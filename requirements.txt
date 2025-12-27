@@ -1,0 +1,15 @@
+# API
+fastapi
+uvicorn
+
+# Base de données
+sqlalchemy
+psycopg2-binary
+
+# Validation & configuration
+pydantic
+email-validator
+python-dotenv
+
+# (Optionnel mais recommandé)
+alembic
