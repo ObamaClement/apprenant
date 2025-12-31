@@ -10,7 +10,7 @@ class Settings(BaseSettings):
     DEBUG: bool = True
     
     # Database
-    DATABASE_URL: str = "postgresql://utilisateur_elsa:elsaelsa@localhost:5432/bdapprenant"
+    DATABASE_URL: str = "postgresql://enspysti:i3BB41ShGAPKpeMo2LRhRAldyUfgSl87@dpg-d5512lggjchc7386uong-a.frankfurt-postgres.render.com/expert_db"
     
  
     class Config:

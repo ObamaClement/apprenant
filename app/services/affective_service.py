@@ -1,7 +1,10 @@
 """Service de gestion de l'état affectif de l'apprenant."""
 from typing import Tuple
 from sqlalchemy.orm import Session
+from sqlalchemy.sql import func
+from uuid import UUID
 from app.models.learner_affective import LearnerAffectiveState
+from app.models.simulation_session import SimulationSession
 
 
 def update_affective_state(
@@ -31,13 +34,9 @@ def update_affective_state(
     
     # Cas 1: Mauvaise performance (score < 50)
     if score < 50:
-        # Augmenter la frustration
         frustration = min(1.0, frustration + 0.15)
-        # Diminuer la confiance
         confidence = max(0.0, confidence - 0.15)
-        # Augmenter le stress
         stress = min(1.0, stress + 0.1)
-        # Diminuer la motivation
         motivation = max(0.0, motivation - 0.1)
     
     # Cas 2: Performance moyenne (50-70)
@@ -80,6 +79,66 @@ def update_affective_state(
     )
 
 
+def record_affective_state(
+    db: Session,
+    session_id: UUID,
+    stress_level: float = None,
+    confidence_level: float = None,
+    motivation_level: float = None,
+    frustration_level: float = None
+) -> LearnerAffectiveState:
+    """
+    Enregistrer un nouvel état affectif pour une session.
+    
+    Args:
+        db: Session de base de données
+        session_id: ID de la session
+        stress_level: Niveau de stress (0-1)
+        confidence_level: Niveau de confiance (0-1)
+        motivation_level: Niveau de motivation (0-1)
+        frustration_level: Niveau de frustration (0-1)
+    
+    Returns:
+        État affectif créé
+    """
+    # Vérifier que la session existe
+    session = db.query(SimulationSession).filter(SimulationSession.id == session_id).first()
+    if not session:
+        raise ValueError(f"Session {session_id} non trouvée")
+    
+    affective = LearnerAffectiveState(
+        session_id=session_id,
+        stress_level=stress_level,
+        confidence_level=confidence_level,
+        motivation_level=motivation_level,
+        frustration_level=frustration_level
+    )
+    
+    db.add(affective)
+    db.commit()
+    db.refresh(affective)
+    return affective
+
+
+def get_latest_affective_state(
+    db: Session,
+    session_id: UUID
+) -> LearnerAffectiveState:
+    """
+    Récupérer le dernier état affectif d'une session.
+    
+    Args:
+        db: Session de base de données
+        session_id: ID de la session
+    
+    Returns:
+        Dernier état affectif ou None
+    """
+    return db.query(LearnerAffectiveState).filter(
+        LearnerAffectiveState.session_id == session_id
+    ).order_by(LearnerAffectiveState.timestamp.desc()).first()
+
+
 def get_affective_label(
     motivation: float,
     frustration: float,
@@ -98,7 +157,6 @@ def get_affective_label(
     Returns:
         Label descriptif
     """
-    # Calculer un score affectif global
     positive_score = (motivation + confidence) / 2
     negative_score = (frustration + stress) / 2
     
@@ -117,30 +175,12 @@ def get_affective_label(
 
 
 def detect_frustration(frustration: float, threshold: float = 0.7) -> bool:
-    """
-    Détecter si l'apprenant est frustré.
-    
-    Args:
-        frustration: Niveau de frustration (0-1)
-        threshold: Seuil de frustration (défaut: 0.7)
-    
-    Returns:
-        True si frustré, False sinon
-    """
+    """Détecter si l'apprenant est frustré."""
     return frustration >= threshold
 
 
 def detect_demotivation(motivation: float, threshold: float = 0.3) -> bool:
-    """
-    Détecter si l'apprenant est démotivé.
-    
-    Args:
-        motivation: Niveau de motivation (0-1)
-        threshold: Seuil de démotivation (défaut: 0.3)
-    
-    Returns:
-        True si démotivé, False sinon
-    """
+    """Détecter si l'apprenant est démotivé."""
     return motivation <= threshold
 
 
@@ -167,23 +207,18 @@ def get_feedback_type(
     is_confident = confidence > 0.7
     is_stressed = stress > 0.7
     
-    # Apprenant frustré → feedback guidé et encourageant
     if is_frustrated:
         return "soutien"
     
-    # Apprenant démotivé → feedback encourageant
     if is_demotivated:
         return "encouragement"
     
-    # Apprenant confiant et non stressé → feedback challenge
     if is_confident and not is_stressed:
         return "challenge"
     
-    # Apprenant stressé → feedback rassurant
     if is_stressed:
         return "soutien"
     
-    # Par défaut → feedback équilibré
     return "aide"
 
 
@@ -207,25 +242,21 @@ def get_affective_recommendations(
     """
     recommendations = []
     
-    # Frustration
     if frustration > 0.7:
         recommendations.append("L'apprenant est très frustré. Proposer une aide immédiate.")
     elif frustration > 0.5:
         recommendations.append("L'apprenant montre des signes de frustration. Réduire la difficulté.")
     
-    # Motivation
     if motivation < 0.3:
         recommendations.append("L'apprenant est démotivé. Proposer des activités plus engageantes.")
     elif motivation < 0.5:
         recommendations.append("La motivation est faible. Augmenter les encouragements.")
     
-    # Confiance
     if confidence < 0.3:
         recommendations.append("L'apprenant manque de confiance. Proposer des activités plus faciles.")
     elif confidence > 0.8:
         recommendations.append("L'apprenant est confiant. Augmenter la difficulté progressivement.")
     
-    # Stress
     if stress > 0.7:
         recommendations.append("L'apprenant est très stressé. Réduire la pression et proposer du soutien.")
     elif stress > 0.5:

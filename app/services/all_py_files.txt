@@ -1,0 +1,2746 @@
+
+
+### FILE: ./performance_service.py
+
+"""Service d'analyse des performances basé sur SimulationSession."""
+from typing import List, Dict, Any
+from sqlalchemy.orm import Session
+from sqlalchemy import func
+from app.models.simulation_session import SimulationSession
+from app.models.cas_clinique import CasCliniqueEnrichi
+
+
+def compute_progress(scores: List[float]) -> float:
+    """
+    Calcul simple de la progression.
+    
+    Retourne la différence entre le dernier score et le premier.
+    
+    Args:
+        scores: Liste des scores (0-100)
+    
+    Returns:
+        Progression (peut être négative)
+    """
+    if len(scores) < 2:
+        return 0.0
+    
+    return scores[-1] - scores[0]
+
+
+def compute_average_score(scores: List[float]) -> float:
+    """
+    Calcul du score moyen.
+    
+    Args:
+        scores: Liste des scores (0-100)
+    
+    Returns:
+        Score moyen
+    """
+    if not scores:
+        return 0.0
+    
+    return sum(scores) / len(scores)
+
+
+def compute_trend(scores: List[float]) -> str:
+    """
+    Déterminer la tendance des performances.
+    
+    Args:
+        scores: Liste des scores (0-100)
+    
+    Returns:
+        "improving", "stable", ou "declining"
+    """
+    if len(scores) < 2:
+        return "stable"
+    
+    # Comparer les 3 derniers scores avec les 3 premiers
+    if len(scores) >= 3:
+        recent_avg = sum(scores[-3:]) / 3
+        earlier_avg = sum(scores[:3]) / 3
+    else:
+        recent_avg = scores[-1]
+        earlier_avg = scores[0]
+    
+    difference = recent_avg - earlier_avg
+    
+    if difference > 5:
+        return "improving"
+    elif difference < -5:
+        return "declining"
+    else:
+        return "stable"
+
+
+def performance_indicator(score: float) -> str:
+    """
+    Indicateur qualitatif de performance.
+    
+    Args:
+        score: Score obtenu (0-100)
+    
+    Returns:
+        Label: "excellent", "bon", "moyen", ou "faible"
+    """
+    if score >= 80:
+        return "excellent"
+    elif score >= 60:
+        return "bon"
+    elif score >= 40:
+        return "moyen"
+    else:
+        return "faible"
+
+
+def get_learner_performance_stats(
+    db: Session,
+    learner_id: int
+) -> Dict[str, Any]:
+    """
+    Obtenir les statistiques de performance d'un apprenant.
+    
+    Args:
+        db: Session de base de données
+        learner_id: ID de l'apprenant
+    
+    Returns:
+        Dictionnaire avec statistiques
+    """
+    # Récupérer toutes les sessions terminées
+    sessions = db.query(SimulationSession).filter(
+        SimulationSession.learner_id == learner_id,
+        SimulationSession.statut == "termine"
+    ).order_by(SimulationSession.start_time).all()
+    
+    if not sessions:
+        return {
+            "learner_id": learner_id,
+            "total_sessions": 0,
+            "average_score": 0.0,
+            "best_score": 0.0,
+            "worst_score": 0.0,
+            "trend": "stable",
+            "total_time_spent": 0,
+            "sessions": []
+        }
+    
+    scores = [s.score_final for s in sessions if s.score_final is not None]
+    times = [s.temps_total for s in sessions if s.temps_total]
+    
+    return {
+        "learner_id": learner_id,
+        "total_sessions": len(sessions),
+        "completed_sessions": len(sessions),
+        "average_score": round(compute_average_score(scores), 2),
+        "best_score": max(scores) if scores else 0.0,
+        "worst_score": min(scores) if scores else 0.0,
+        "progress": round(compute_progress(scores), 2),
+        "trend": compute_trend(scores),
+        "total_time_spent": sum(times) if times else 0,
+        "average_time_per_session": round(sum(times) / len(times), 2) if times else 0,
+        "sessions": [
+            {
+                "id": str(s.id),
+                "cas_clinique_id": s.cas_clinique_id,
+                "score": s.score_final,
+                "indicator": performance_indicator(s.score_final) if s.score_final else "N/A",
+                "temps_total": s.temps_total,
+                "start_time": s.start_time.isoformat() if s.start_time else None,
+                "raison_fin": s.raison_fin
+            }
+            for s in sessions
+        ]
+    }
+
+
+def get_performance_by_difficulty(
+    db: Session,
+    learner_id: int
+) -> Dict[int, Dict[str, Any]]:
+    """
+    Obtenir les performances par niveau de difficulté.
+    
+    Args:
+        db: Session de base de données
+        learner_id: ID de l'apprenant
+    
+    Returns:
+        Dictionnaire {niveau_difficulte: statistiques}
+    """
+    sessions = db.query(SimulationSession).filter(
+        SimulationSession.learner_id == learner_id,
+        SimulationSession.statut == "termine"
+    ).all()
+    
+    # Grouper par niveau de difficulté
+    by_difficulty = {}
+    
+    for session in sessions:
+        case = db.query(CasCliniqueEnrichi).filter(
+            CasCliniqueEnrichi.id == session.cas_clinique_id
+        ).first()
+        
+        if not case or not case.niveau_difficulte:
+            continue
+        
+        level = case.niveau_difficulte
+        
+        if level not in by_difficulty:
+            by_difficulty[level] = {
+                "sessions": [],
+                "scores": []
+            }
+        
+        by_difficulty[level]["sessions"].append(session)
+        if session.score_final is not None:
+            by_difficulty[level]["scores"].append(session.score_final)
+    
+    # Calculer les statistiques par niveau
+    stats = {}
+    for level, data in by_difficulty.items():
+        scores = data["scores"]
+        stats[level] = {
+            "niveau_difficulte": level,
+            "nb_sessions": len(data["sessions"]),
+            "average_score": round(compute_average_score(scores), 2),
+            "best_score": max(scores) if scores else 0.0,
+            "success_rate": len([s for s in scores if s >= 60]) / len(scores) * 100 if scores else 0.0
+        }
+    
+    return stats
+
+
+def identify_weak_cases(
+    db: Session,
+    learner_id: int,
+    threshold: float = 60.0
+) -> List[Dict[str, Any]]:
+    """
+    Identifier les cas où l'apprenant a eu des difficultés.
+    
+    Args:
+        db: Session de base de données
+        learner_id: ID de l'apprenant
+        threshold: Seuil de score (défaut: 60)
+    
+    Returns:
+        Liste des cas difficiles
+    """
+    sessions = db.query(SimulationSession).filter(
+        SimulationSession.learner_id == learner_id,
+        SimulationSession.statut == "termine",
+        SimulationSession.score_final < threshold
+    ).all()
+    
+    weak_cases = []
+    
+    for session in sessions:
+        case = db.query(CasCliniqueEnrichi).filter(
+            CasCliniqueEnrichi.id == session.cas_clinique_id
+        ).first()
+        
+        if case:
+            weak_cases.append({
+                "session_id": str(session.id),
+                "cas_clinique_id": case.id,
+                "code_fultang": case.code_fultang,
+                "niveau_difficulte": case.niveau_difficulte,
+                "score": session.score_final,
+                "pathologie_id": case.pathologie_principale_id,
+                "date": session.start_time.isoformat() if session.start_time else None
+            })
+    
+    # Trier par score croissant
+    weak_cases.sort(key=lambda x: x["score"])
+    
+    return weak_cases
+
+
+def get_performance_summary(
+    db: Session,
+    learner_id: int
+) -> Dict[str, Any]:
+    """
+    Obtenir un résumé complet des performances.
+    
+    Args:
+        db: Session de base de données
+        learner_id: ID de l'apprenant
+    
+    Returns:
+        Résumé complet
+    """
+    general_stats = get_learner_performance_stats(db, learner_id)
+    by_difficulty = get_performance_by_difficulty(db, learner_id)
+    weak_cases = identify_weak_cases(db, learner_id)
+    
+    return {
+        "general": general_stats,
+        "by_difficulty": by_difficulty,
+        "weak_cases": weak_cases[:5],  # Top 5 des cas difficiles
+        "recommendations": _generate_recommendations(general_stats, by_difficulty, weak_cases)
+    }
+
+
+def _generate_recommendations(
+    general_stats: Dict,
+    by_difficulty: Dict,
+    weak_cases: List
+) -> List[str]:
+    """
+    Générer des recommandations basées sur les performances.
+    
+    Args:
+        general_stats: Statistiques générales
+        by_difficulty: Performances par difficulté
+        weak_cases: Cas difficiles
+    
+    Returns:
+        Liste de recommandations
+    """
+    recommendations = []
+    
+    avg_score = general_stats.get("average_score", 0)
+    trend = general_stats.get("trend", "stable")
+    
+    # Recommandations basées sur le score moyen
+    if avg_score < 50:
+        recommendations.append("Score moyen faible. Revoir les fondamentaux et commencer par des cas plus simples.")
+    elif avg_score < 70:
+        recommendations.append("Performances moyennes. Continuer à pratiquer sur des cas variés.")
+    else:
+        recommendations.append("Bonnes performances. Prêt pour des cas plus complexes.")
+    
+    # Recommandations basées sur la tendance
+    if trend == "declining":
+        recommendations.append("Tendance à la baisse détectée. Faire une pause ou revoir les concepts de base.")
+    elif trend == "improving":
+        recommendations.append("Progression positive ! Continuer sur cette lancée.")
+    
+    # Recommandations basées sur les niveaux de difficulté
+    if by_difficulty:
+        levels_with_issues = [
+            level for level, stats in by_difficulty.items()
+            if stats["average_score"] < 60
+        ]
+        if levels_with_issues:
+            recommendations.append(
+                f"Difficultés sur les niveaux {', '.join(map(str, levels_with_issues))}. "
+                "Concentrer les efforts sur ces niveaux."
+            )
+    
+    # Recommandations basées sur les cas faibles
+    if len(weak_cases) > 5:
+        recommendations.append(
+            f"Plusieurs cas difficiles identifiés ({len(weak_cases)}). "
+            "Reprendre les cas échoués pour renforcer la maîtrise."
+        )
+    
+    return recommendations
+
+### FILE: ./cas_clinique_service.py
+
+"""Service pour les cas cliniques."""
+from sqlalchemy.orm import Session
+from sqlalchemy import func
+from typing import List, Optional, Dict, Any
+from app.models.cas_clinique import CasCliniqueEnrichi
+from app.models.pathologie import Pathologie
+
+
+def get_all_cases(
+    db: Session,
+    skip: int = 0,
+    limit: int = 100,
+    niveau_difficulte: Optional[int] = None,
+    valide_expert: Optional[bool] = True
+) -> List[CasCliniqueEnrichi]:
+    """
+    Récupérer tous les cas cliniques avec filtres.
+    
+    Args:
+        db: Session de base de données
+        skip: Nombre de résultats à sauter
+        limit: Nombre maximum de résultats
+        niveau_difficulte: Filtrer par niveau (1-5)
+        valide_expert: Filtrer par validation expert
+    
+    Returns:
+        Liste des cas cliniques
+    """
+    query = db.query(CasCliniqueEnrichi)
+    
+    if niveau_difficulte is not None:
+        query = query.filter(CasCliniqueEnrichi.niveau_difficulte == niveau_difficulte)
+    
+    if valide_expert is not None:
+        query = query.filter(CasCliniqueEnrichi.valide_expert == valide_expert)
+    
+    return query.offset(skip).limit(limit).all()
+
+
+def get_case_by_id(db: Session, cas_id: int) -> Optional[CasCliniqueEnrichi]:
+    """
+    Récupérer un cas clinique par ID.
+    
+    Args:
+        db: Session de base de données
+        cas_id: ID du cas clinique
+    
+    Returns:
+        Cas clinique ou None
+    """
+    return db.query(CasCliniqueEnrichi).filter(CasCliniqueEnrichi.id == cas_id).first()
+
+
+def get_case_by_code(db: Session, code_fultang: str) -> Optional[CasCliniqueEnrichi]:
+    """
+    Récupérer un cas clinique par son code.
+    
+    Args:
+        db: Session de base de données
+        code_fultang: Code du cas
+    
+    Returns:
+        Cas clinique ou None
+    """
+    return db.query(CasCliniqueEnrichi).filter(
+        CasCliniqueEnrichi.code_fultang == code_fultang
+    ).first()
+
+
+def get_cases_by_pathologie(
+    db: Session,
+    pathologie_id: int,
+    skip: int = 0,
+    limit: int = 50
+) -> List[CasCliniqueEnrichi]:
+    """
+    Récupérer les cas pour une pathologie donnée.
+    
+    Args:
+        db: Session de base de données
+        pathologie_id: ID de la pathologie
+        skip: Nombre de résultats à sauter
+        limit: Nombre maximum de résultats
+    
+    Returns:
+        Liste des cas cliniques
+    """
+    return db.query(CasCliniqueEnrichi).filter(
+        CasCliniqueEnrichi.pathologie_principale_id == pathologie_id
+    ).offset(skip).limit(limit).all()
+
+
+def get_cases_by_competences(
+    db: Session,
+    competences_ids: List[int],
+    skip: int = 0,
+    limit: int = 50
+) -> List[CasCliniqueEnrichi]:
+    """
+    Récupérer les cas qui sollicitent des compétences données.
+    
+    Args:
+        db: Session de base de données
+        competences_ids: Liste des IDs de compétences
+        skip: Nombre de résultats à sauter
+        limit: Nombre maximum de résultats
+    
+    Returns:
+        Liste des cas cliniques
+    """
+    # Les compétences sont stockées en JSON dans competences_requises
+    cases = db.query(CasCliniqueEnrichi).filter(
+        CasCliniqueEnrichi.competences_requises.isnot(None)
+    ).offset(skip).limit(limit).all()
+    
+    # Filtrer en Python (car JSON)
+    filtered = []
+    for case in cases:
+        if case.competences_requises and isinstance(case.competences_requises, dict):
+            case_comp_ids = case.competences_requises.get('competence_ids', [])
+            if any(comp_id in case_comp_ids for comp_id in competences_ids):
+                filtered.append(case)
+    
+    return filtered
+
+
+def increment_case_usage(db: Session, cas_id: int) -> None:
+    """
+    Incrémenter le compteur d'utilisation d'un cas.
+    
+    Args:
+        db: Session de base de données
+        cas_id: ID du cas clinique
+    """
+    case = db.query(CasCliniqueEnrichi).filter(CasCliniqueEnrichi.id == cas_id).first()
+    if case:
+        case.nb_utilisations = (case.nb_utilisations or 0) + 1
+        db.commit()
+
+
+def update_case_statistics(
+    db: Session,
+    cas_id: int,
+    score: float,
+    diagnostic_correct: bool
+) -> None:
+    """
+    Mettre à jour les statistiques d'un cas (note moyenne, taux succès).
+    
+    Args:
+        db: Session de base de données
+        cas_id: ID du cas clinique
+        score: Score obtenu (0-100)
+        diagnostic_correct: Le diagnostic était-il correct ?
+    """
+    case = db.query(CasCliniqueEnrichi).filter(CasCliniqueEnrichi.id == cas_id).first()
+    if not case:
+        return
+    
+    # Mettre à jour la note moyenne
+    if case.note_moyenne_apprenants is None:
+        case.note_moyenne_apprenants = score / 100.0
+    else:
+        # Moyenne pondérée
+        nb_uses = case.nb_utilisations or 1
+        current_avg = float(case.note_moyenne_apprenants)
+        case.note_moyenne_apprenants = (current_avg * (nb_uses - 1) + score / 100.0) / nb_uses
+    
+    # Mettre à jour le taux de succès diagnostic
+    if case.taux_succes_diagnostic is None:
+        case.taux_succes_diagnostic = 100.0 if diagnostic_correct else 0.0
+    else:
+        nb_uses = case.nb_utilisations or 1
+        current_rate = float(case.taux_succes_diagnostic)
+        success_increment = 100.0 if diagnostic_correct else 0.0
+        case.taux_succes_diagnostic = (current_rate * (nb_uses - 1) + success_increment) / nb_uses
+    
+    db.commit()
+
+
+def get_recommended_cases_for_learner(
+    db: Session,
+    learner_id: int,
+    limit: int = 5
+) -> List[Dict[str, Any]]:
+    """
+    Recommander des cas adaptés au niveau de l'apprenant.
+    
+    Args:
+        db: Session de base de données
+        learner_id: ID de l'apprenant
+        limit: Nombre de cas à recommander
+    
+    Returns:
+        Liste des cas recommandés avec scores de pertinence
+    """
+    # Récupérer les maîtrises de l'apprenant
+    from app.models.learner_competency_mastery import LearnerCompetencyMastery
+    
+    masteries = db.query(LearnerCompetencyMastery).filter(
+        LearnerCompetencyMastery.learner_id == learner_id
+    ).all()
+    
+    # Calculer le niveau moyen de l'apprenant
+    if masteries:
+        avg_mastery = sum(m.mastery_level or 0 for m in masteries) / len(masteries)
+    else:
+        avg_mastery = 0.3  # Débutant par défaut
+    
+    # Déterminer le niveau de difficulté adapté
+    if avg_mastery < 0.3:
+        target_difficulty = 1
+    elif avg_mastery < 0.5:
+        target_difficulty = 2
+    elif avg_mastery < 0.7:
+        target_difficulty = 3
+    elif avg_mastery < 0.85:
+        target_difficulty = 4
+    else:
+        target_difficulty = 5
+    
+    # Récupérer les cas de ce niveau
+    cases = db.query(CasCliniqueEnrichi).filter(
+        CasCliniqueEnrichi.niveau_difficulte == target_difficulty,
+        CasCliniqueEnrichi.valide_expert == True
+    ).limit(limit * 2).all()  # Plus de cas pour filtrer
+    
+    # Scorer les cas
+    recommendations = []
+    for case in cases:
+        score = 1.0
+        
+        # Bonus si peu utilisé (découverte)
+        if (case.nb_utilisations or 0) < 5:
+            score += 0.2
+        
+        # Bonus si bonne note moyenne
+        if case.note_moyenne_apprenants and case.note_moyenne_apprenants > 0.7:
+            score += 0.1
+        
+        recommendations.append({
+            'case': case,
+            'relevance_score': score,
+            'reason': f"Adapté à votre niveau (difficulté {target_difficulty})"
+        })
+    
+    # Trier par score et limiter
+    recommendations.sort(key=lambda x: x['relevance_score'], reverse=True)
+    return recommendations[:limit]
+
+### FILE: ./behavior_service.py
+
+"""Service d'analyse du comportement de l'apprenant."""
+
+
+def compute_engagement(
+    sessions: int,
+    activities: int,
+    time_spent: int
+) -> float:
+    """
+    Calcul du score d'engagement.
+    
+    Formule pondérée:
+    - Sessions: 30% (fréquence de connexion)
+    - Activités: 40% (nombre d'activités réalisées)
+    - Temps: 30% (temps total passé)
+    
+    Args:
+        sessions: Nombre de sessions
+        activities: Nombre d'activités réalisées
+        time_spent: Temps total en secondes
+    
+    Returns:
+        Score d'engagement (0.0 à 1.0)
+    """
+    # Normaliser les valeurs
+    sessions_score = min(sessions / 20, 1.0)  # Max 20 sessions
+    activities_score = min(activities / 50, 1.0)  # Max 50 activités
+    time_score = min(time_spent / 36000, 1.0)  # Max 10 heures
+    
+    # Calcul pondéré
+    engagement = (sessions_score * 0.3) + (activities_score * 0.4) + (time_score * 0.3)
+    
+    return min(1.0, max(0.0, engagement))
+
+
+def get_engagement_label(engagement_score: float) -> str:
+    """
+    Obtenir un label textuel pour le score d'engagement.
+    
+    Args:
+        engagement_score: Score d'engagement (0.0 à 1.0)
+    
+    Returns:
+        Label descriptif
+    """
+    if engagement_score >= 0.8:
+        return "Très engagé"
+    elif engagement_score >= 0.6:
+        return "Engagé"
+    elif engagement_score >= 0.4:
+        return "Modérément engagé"
+    elif engagement_score >= 0.2:
+        return "Peu engagé"
+    else:
+        return "Désengagé"
+
+
+def compute_activity_rate(activities: int, sessions: int) -> float:
+    """
+    Calcul du taux d'activité par session.
+    
+    Args:
+        activities: Nombre d'activités réalisées
+        sessions: Nombre de sessions
+    
+    Returns:
+        Nombre moyen d'activités par session
+    """
+    if sessions == 0:
+        return 0.0
+    
+    return activities / sessions
+
+
+def detect_disengagement(
+    sessions: int,
+    activities: int,
+    time_spent: int,
+    threshold: float = 0.3
+) -> bool:
+    """
+    Détecter si l'apprenant est désengagé.
+    
+    Args:
+        sessions: Nombre de sessions
+        activities: Nombre d'activités
+        time_spent: Temps total en secondes
+        threshold: Seuil d'engagement (défaut: 0.3)
+    
+    Returns:
+        True si désengagé, False sinon
+    """
+    engagement = compute_engagement(sessions, activities, time_spent)
+    return engagement < threshold
+
+
+def compute_consistency(activity_times: list[int]) -> float:
+    """
+    Mesurer la cohérence/régularité de l'engagement.
+    
+    Utilise l'écart-type normalisé.
+    
+    Args:
+        activity_times: Liste des temps passés par activité
+    
+    Returns:
+        Score de cohérence (0.0 à 1.0)
+    """
+    if len(activity_times) < 2:
+        return 1.0
+    
+    mean_time = sum(activity_times) / len(activity_times)
+    
+    if mean_time == 0:
+        return 0.0
+    
+    # Calcul de l'écart-type
+    variance = sum((t - mean_time) ** 2 for t in activity_times) / len(activity_times)
+    std_dev = variance ** 0.5
+    
+    # Coefficient de variation normalisé
+    cv = std_dev / mean_time
+    
+    # Convertir en score (moins de variation = plus de cohérence)
+    consistency = 1.0 / (1.0 + cv)
+    
+    return min(1.0, max(0.0, consistency))
+
+
+def get_behavior_profile(
+    sessions: int,
+    activities: int,
+    time_spent: int,
+    activity_times: list[int] = None
+) -> dict:
+    """
+    Obtenir un profil comportemental complet.
+    
+    Args:
+        sessions: Nombre de sessions
+        activities: Nombre d'activités
+        time_spent: Temps total en secondes
+        activity_times: Liste optionnelle des temps par activité
+    
+    Returns:
+        Dictionnaire avec profil comportemental
+    """
+    engagement = compute_engagement(sessions, activities, time_spent)
+    activity_rate = compute_activity_rate(activities, sessions)
+    is_disengaged = detect_disengagement(sessions, activities, time_spent)
+    consistency = compute_consistency(activity_times) if activity_times else 0.5
+    
+    return {
+        "engagement_score": round(engagement, 2),
+        "engagement_label": get_engagement_label(engagement),
+        "sessions": sessions,
+        "activities": activities,
+        "total_time_spent": time_spent,
+        "average_time_per_activity": round(time_spent / activities, 2) if activities > 0 else 0,
+        "activity_rate": round(activity_rate, 2),
+        "is_disengaged": is_disengaged,
+        "consistency": round(consistency, 2),
+        "recommendations": _get_recommendations(engagement, activity_rate, consistency)
+    }
+
+
+def _get_recommendations(engagement: float, activity_rate: float, consistency: float) -> list[str]:
+    """
+    Générer des recommandations basées sur le profil comportemental.
+    
+    Args:
+        engagement: Score d'engagement
+        activity_rate: Taux d'activité par session
+        consistency: Score de cohérence
+    
+    Returns:
+        Liste de recommandations
+    """
+    recommendations = []
+    
+    if engagement < 0.3:
+        recommendations.append("L'apprenant est désengagé. Envisager une intervention pédagogique.")
+    elif engagement < 0.5:
+        recommendations.append("L'engagement est faible. Proposer des activités plus motivantes.")
+    
+    if activity_rate < 1.0:
+        recommendations.append("Le taux d'activité est faible. Encourager plus d'activités par session.")
+    
+    if consistency < 0.5:
+        recommendations.append("L'engagement est irrégulier. Établir une routine d'apprentissage.")
+    
+    if not recommendations:
+        recommendations.append("L'apprenant montre un bon engagement et une bonne cohérence.")
+    
+    return recommendations
+
+### FILE: ./interaction_log_service.py
+
+"""Service pour les logs d'interaction."""
+from sqlalchemy.orm import Session
+from typing import List, Optional, Dict, Any
+from uuid import UUID
+from app.models.interaction_log import InteractionLog
+from app.models.simulation_session import SimulationSession
+
+
+def create_interaction(
+    db: Session,
+    session_id: UUID,
+    action_type: str,
+    action_category: Optional[str] = None,
+    action_content: Optional[Dict[str, Any]] = None,
+    response_latency: Optional[int] = None
+) -> InteractionLog:
+    """
+    Enregistrer une interaction.
+    
+    Args:
+        db: Session de base de données
+        session_id: ID de la session
+        action_type: Type d'action
+        action_category: Catégorie d'action
+        action_content: Contenu de l'action (JSON)
+        response_latency: Latence de réponse (ms)
+    
+    Returns:
+        Log d'interaction créé
+    """
+    # Vérifier que la session existe
+    session = db.query(SimulationSession).filter(SimulationSession.id == session_id).first()
+    if not session:
+        raise ValueError(f"Session {session_id} non trouvée")
+    
+    # Créer le log
+    log = InteractionLog(
+        session_id=session_id,
+        action_type=action_type,
+        action_category=action_category,
+        action_content=action_content,
+        response_latency=response_latency
+    )
+    
+    db.add(log)
+    db.commit()
+    db.refresh(log)
+    return log
+
+
+def create_interactions_batch(
+    db: Session,
+    session_id: UUID,
+    actions: List[Dict[str, Any]]
+) -> List[InteractionLog]:
+    """
+    Enregistrer plusieurs interactions en batch.
+    
+    Args:
+        db: Session de base de données
+        session_id: ID de la session
+        actions: Liste des actions à enregistrer
+    
+    Returns:
+        Liste des logs créés
+    """
+    logs = []
+    
+    for action in actions:
+        log = InteractionLog(
+            session_id=session_id,
+            action_type=action.get('action_type'),
+            action_category=action.get('action_category'),
+            action_content=action.get('action_content'),
+            response_latency=action.get('response_latency')
+        )
+        db.add(log)
+        logs.append(log)
+    
+    db.commit()
+    
+    for log in logs:
+        db.refresh(log)
+    
+    return logs
+
+
+def get_interactions_by_session(
+    db: Session,
+    session_id: UUID
+) -> List[InteractionLog]:
+    """
+    Récupérer toutes les interactions d'une session.
+    
+    Args:
+        db: Session de base de données
+        session_id: ID de la session
+    
+    Returns:
+        Liste des interactions
+    """
+    return db.query(InteractionLog).filter(
+        InteractionLog.session_id == session_id
+    ).order_by(InteractionLog.timestamp).all()
+
+
+def get_interactions_by_category(
+    db: Session,
+    session_id: UUID,
+    category: str
+) -> List[InteractionLog]:
+    """
+    Récupérer les interactions d'une catégorie donnée.
+    
+    Args:
+        db: Session de base de données
+        session_id: ID de la session
+        category: Catégorie d'action
+    
+    Returns:
+        Liste des interactions
+    """
+    return db.query(InteractionLog).filter(
+        InteractionLog.session_id == session_id,
+        InteractionLog.action_category == category
+    ).order_by(InteractionLog.timestamp).all()
+
+
+def get_interactions_by_type(
+    db: Session,
+    session_id: UUID,
+    action_type: str
+) -> List[InteractionLog]:
+    """
+    Récupérer les interactions d'un type donné.
+    
+    Args:
+        db: Session de base de données
+        session_id: ID de la session
+        action_type: Type d'action
+    
+    Returns:
+        Liste des interactions
+    """
+    return db.query(InteractionLog).filter(
+        InteractionLog.session_id == session_id,
+        InteractionLog.action_type == action_type
+    ).order_by(InteractionLog.timestamp).all()
+
+
+def mark_interaction_relevance(
+    db: Session,
+    interaction_id: int,
+    est_pertinent: bool,
+    charge_cognitive: Optional[float] = None
+) -> Optional[InteractionLog]:
+    """
+    Marquer la pertinence d'une interaction.
+    
+    Args:
+        db: Session de base de données
+        interaction_id: ID de l'interaction
+        est_pertinent: L'action était-elle pertinente ?
+        charge_cognitive: Charge cognitive estimée
+    
+    Returns:
+        Log mis à jour ou None
+    """
+    log = db.query(InteractionLog).filter(InteractionLog.id == interaction_id).first()
+    if not log:
+        return None
+    
+    log.est_pertinent = est_pertinent
+    if charge_cognitive is not None:
+        log.charge_cognitive_estimee = charge_cognitive
+    
+    db.commit()
+    db.refresh(log)
+    return log
+
+
+def analyze_session_interactions(
+    db: Session,
+    session_id: UUID
+) -> Dict[str, Any]:
+    """
+    Analyser les interactions d'une session.
+    
+    Args:
+        db: Session de base de données
+        session_id: ID de la session
+    
+    Returns:
+        Statistiques d'analyse
+    """
+    interactions = get_interactions_by_session(db, session_id)
+    
+    if not interactions:
+        return {
+            "total_interactions": 0,
+            "average_latency": 0,
+            "pertinent_rate": 0.0,
+            "categories": {}
+        }
+    
+    # Statistiques globales
+    latencies = [i.response_latency for i in interactions if i.response_latency]
+    pertinent_count = sum(1 for i in interactions if i.est_pertinent is True)
+    evaluated_count = sum(1 for i in interactions if i.est_pertinent is not None)
+    
+    # Par catégorie
+    categories = {}
+    for interaction in interactions:
+        cat = interaction.action_category or "non_categorise"
+        if cat not in categories:
+            categories[cat] = 0
+        categories[cat] += 1
+    
+    return {
+        "total_interactions": len(interactions),
+        "average_latency": sum(latencies) / len(latencies) if latencies else 0,
+        "pertinent_rate": (pertinent_count / evaluated_count * 100) if evaluated_count > 0 else 0.0,
+        "categories": categories,
+        "evaluated_interactions": evaluated_count
+    }
+
+### FILE: ./affective_service.py
+
+"""Service de gestion de l'état affectif de l'apprenant."""
+from typing import Tuple
+from sqlalchemy.orm import Session
+from sqlalchemy.sql import func
+from uuid import UUID
+from app.models.learner_affective import LearnerAffectiveState
+from app.models.simulation_session import SimulationSession
+
+
+def update_affective_state(
+    motivation: float,
+    frustration: float,
+    confidence: float,
+    stress: float,
+    score: float,
+    previous_score: float = None
+) -> Tuple[float, float, float, float]:
+    """
+    Mise à jour de l'état affectif basée sur la performance.
+    
+    Args:
+        motivation: Motivation actuelle (0-1)
+        frustration: Frustration actuelle (0-1)
+        confidence: Confiance actuelle (0-1)
+        stress: Stress actuel (0-1)
+        score: Score obtenu (0-100)
+        previous_score: Score précédent (optionnel)
+    
+    Returns:
+        Tuple (motivation, frustration, confidence, stress) mis à jour
+    """
+    # Normaliser le score (0-100 → 0-1)
+    normalized_score = score / 100.0
+    
+    # Cas 1: Mauvaise performance (score < 50)
+    if score < 50:
+        frustration = min(1.0, frustration + 0.15)
+        confidence = max(0.0, confidence - 0.15)
+        stress = min(1.0, stress + 0.1)
+        motivation = max(0.0, motivation - 0.1)
+    
+    # Cas 2: Performance moyenne (50-70)
+    elif score < 70:
+        frustration = max(0.0, frustration - 0.05)
+        confidence = max(0.0, confidence - 0.05)
+        stress = max(0.0, stress - 0.05)
+        motivation = min(1.0, motivation + 0.05)
+    
+    # Cas 3: Bonne performance (70-85)
+    elif score < 85:
+        motivation = min(1.0, motivation + 0.15)
+        frustration = max(0.0, frustration - 0.1)
+        confidence = min(1.0, confidence + 0.1)
+        stress = max(0.0, stress - 0.1)
+    
+    # Cas 4: Excellente performance (≥ 85)
+    else:
+        motivation = min(1.0, motivation + 0.2)
+        frustration = max(0.0, frustration - 0.15)
+        confidence = min(1.0, confidence + 0.2)
+        stress = max(0.0, stress - 0.15)
+    
+    # Ajustement basé sur la progression
+    if previous_score is not None:
+        progress = score - previous_score
+        
+        if progress > 10:  # Progression significative
+            motivation = min(1.0, motivation + 0.1)
+            confidence = min(1.0, confidence + 0.1)
+        elif progress < -10:  # Régression significative
+            frustration = min(1.0, frustration + 0.1)
+            confidence = max(0.0, confidence - 0.1)
+    
+    return (
+        round(motivation, 2),
+        round(frustration, 2),
+        round(confidence, 2),
+        round(stress, 2)
+    )
+
+
+def record_affective_state(
+    db: Session,
+    session_id: UUID,
+    stress_level: float = None,
+    confidence_level: float = None,
+    motivation_level: float = None,
+    frustration_level: float = None
+) -> LearnerAffectiveState:
+    """
+    Enregistrer un nouvel état affectif pour une session.
+    
+    Args:
+        db: Session de base de données
+        session_id: ID de la session
+        stress_level: Niveau de stress (0-1)
+        confidence_level: Niveau de confiance (0-1)
+        motivation_level: Niveau de motivation (0-1)
+        frustration_level: Niveau de frustration (0-1)
+    
+    Returns:
+        État affectif créé
+    """
+    # Vérifier que la session existe
+    session = db.query(SimulationSession).filter(SimulationSession.id == session_id).first()
+    if not session:
+        raise ValueError(f"Session {session_id} non trouvée")
+    
+    affective = LearnerAffectiveState(
+        session_id=session_id,
+        stress_level=stress_level,
+        confidence_level=confidence_level,
+        motivation_level=motivation_level,
+        frustration_level=frustration_level
+    )
+    
+    db.add(affective)
+    db.commit()
+    db.refresh(affective)
+    return affective
+
+
+def get_latest_affective_state(
+    db: Session,
+    session_id: UUID
+) -> LearnerAffectiveState:
+    """
+    Récupérer le dernier état affectif d'une session.
+    
+    Args:
+        db: Session de base de données
+        session_id: ID de la session
+    
+    Returns:
+        Dernier état affectif ou None
+    """
+    return db.query(LearnerAffectiveState).filter(
+        LearnerAffectiveState.session_id == session_id
+    ).order_by(LearnerAffectiveState.timestamp.desc()).first()
+
+
+def get_affective_label(
+    motivation: float,
+    frustration: float,
+    confidence: float,
+    stress: float
+) -> str:
+    """
+    Obtenir un label descriptif de l'état affectif global.
+    
+    Args:
+        motivation: Motivation (0-1)
+        frustration: Frustration (0-1)
+        confidence: Confiance (0-1)
+        stress: Stress (0-1)
+    
+    Returns:
+        Label descriptif
+    """
+    positive_score = (motivation + confidence) / 2
+    negative_score = (frustration + stress) / 2
+    
+    affective_balance = positive_score - negative_score
+    
+    if affective_balance > 0.3:
+        return "Très positif"
+    elif affective_balance > 0.1:
+        return "Positif"
+    elif affective_balance > -0.1:
+        return "Neutre"
+    elif affective_balance > -0.3:
+        return "Négatif"
+    else:
+        return "Très négatif"
+
+
+def detect_frustration(frustration: float, threshold: float = 0.7) -> bool:
+    """Détecter si l'apprenant est frustré."""
+    return frustration >= threshold
+
+
+def detect_demotivation(motivation: float, threshold: float = 0.3) -> bool:
+    """Détecter si l'apprenant est démotivé."""
+    return motivation <= threshold
+
+
+def get_feedback_type(
+    motivation: float,
+    frustration: float,
+    confidence: float,
+    stress: float
+) -> str:
+    """
+    Déterminer le type de feedback à fournir.
+    
+    Args:
+        motivation: Motivation (0-1)
+        frustration: Frustration (0-1)
+        confidence: Confiance (0-1)
+        stress: Stress (0-1)
+    
+    Returns:
+        Type de feedback: "encouragement", "aide", "challenge", "soutien"
+    """
+    is_frustrated = detect_frustration(frustration)
+    is_demotivated = detect_demotivation(motivation)
+    is_confident = confidence > 0.7
+    is_stressed = stress > 0.7
+    
+    if is_frustrated:
+        return "soutien"
+    
+    if is_demotivated:
+        return "encouragement"
+    
+    if is_confident and not is_stressed:
+        return "challenge"
+    
+    if is_stressed:
+        return "soutien"
+    
+    return "aide"
+
+
+def get_affective_recommendations(
+    motivation: float,
+    frustration: float,
+    confidence: float,
+    stress: float
+) -> list[str]:
+    """
+    Générer des recommandations basées sur l'état affectif.
+    
+    Args:
+        motivation: Motivation (0-1)
+        frustration: Frustration (0-1)
+        confidence: Confiance (0-1)
+        stress: Stress (0-1)
+    
+    Returns:
+        Liste de recommandations
+    """
+    recommendations = []
+    
+    if frustration > 0.7:
+        recommendations.append("L'apprenant est très frustré. Proposer une aide immédiate.")
+    elif frustration > 0.5:
+        recommendations.append("L'apprenant montre des signes de frustration. Réduire la difficulté.")
+    
+    if motivation < 0.3:
+        recommendations.append("L'apprenant est démotivé. Proposer des activités plus engageantes.")
+    elif motivation < 0.5:
+        recommendations.append("La motivation est faible. Augmenter les encouragements.")
+    
+    if confidence < 0.3:
+        recommendations.append("L'apprenant manque de confiance. Proposer des activités plus faciles.")
+    elif confidence > 0.8:
+        recommendations.append("L'apprenant est confiant. Augmenter la difficulté progressivement.")
+    
+    if stress > 0.7:
+        recommendations.append("L'apprenant est très stressé. Réduire la pression et proposer du soutien.")
+    elif stress > 0.5:
+        recommendations.append("L'apprenant montre des signes de stress. Ralentir le rythme.")
+    
+    if not recommendations:
+        recommendations.append("L'apprenant semble en bon équilibre affectif. Maintenir le rythme actuel.")
+    
+    return recommendations
+
+
+def get_affective_profile(
+    motivation: float,
+    frustration: float,
+    confidence: float,
+    stress: float
+) -> dict:
+    """
+    Obtenir un profil affectif complet.
+    
+    Args:
+        motivation: Motivation (0-1)
+        frustration: Frustration (0-1)
+        confidence: Confiance (0-1)
+        stress: Stress (0-1)
+    
+    Returns:
+        Dictionnaire avec profil affectif complet
+    """
+    return {
+        "motivation": motivation,
+        "frustration": frustration,
+        "confidence": confidence,
+        "stress": stress,
+        "affective_label": get_affective_label(motivation, frustration, confidence, stress),
+        "is_frustrated": detect_frustration(frustration),
+        "is_demotivated": detect_demotivation(motivation),
+        "feedback_type": get_feedback_type(motivation, frustration, confidence, stress),
+        "recommendations": get_affective_recommendations(motivation, frustration, confidence, stress)
+    }
+
+### FILE: ./__init__.py
+
+
+
+### FILE: ./simulation_session_service.py
+
+"""Service pour les sessions de simulation."""
+from sqlalchemy.orm import Session
+from sqlalchemy.sql import func
+from typing import List, Optional
+from uuid import UUID
+from datetime import datetime
+from app.models.simulation_session import SimulationSession
+from app.models.learner import Learner
+from app.models.cas_clinique import CasCliniqueEnrichi
+
+
+def create_session(
+    db: Session,
+    learner_id: int,
+    cas_clinique_id: int
+) -> SimulationSession:
+    """
+    Créer une nouvelle session de simulation.
+    
+    Args:
+        db: Session de base de données
+        learner_id: ID de l'apprenant
+        cas_clinique_id: ID du cas clinique
+    
+    Returns:
+        Session créée
+    """
+    # Vérifier que l'apprenant existe
+    learner = db.query(Learner).filter(Learner.id == learner_id).first()
+    if not learner:
+        raise ValueError(f"Apprenant {learner_id} non trouvé")
+    
+    # Vérifier que le cas existe
+    case = db.query(CasCliniqueEnrichi).filter(CasCliniqueEnrichi.id == cas_clinique_id).first()
+    if not case:
+        raise ValueError(f"Cas clinique {cas_clinique_id} non trouvé")
+    
+    # Créer la session
+    session = SimulationSession(
+        learner_id=learner_id,
+        cas_clinique_id=cas_clinique_id,
+        statut="en_cours",
+        current_stage="anamnese"
+    )
+    
+    db.add(session)
+    db.commit()
+    db.refresh(session)
+    
+    # Incrémenter le compteur d'utilisation du cas
+    from app.services.cas_clinique_service import increment_case_usage
+    increment_case_usage(db, cas_clinique_id)
+    
+    return session
+
+
+def get_session_by_id(db: Session, session_id: UUID) -> Optional[SimulationSession]:
+    """
+    Récupérer une session par ID.
+    
+    Args:
+        db: Session de base de données
+        session_id: ID de la session
+    
+    Returns:
+        Session ou None
+    """
+    return db.query(SimulationSession).filter(SimulationSession.id == session_id).first()
+
+
+def get_sessions_by_learner(
+    db: Session,
+    learner_id: int,
+    skip: int = 0,
+    limit: int = 50
+) -> List[SimulationSession]:
+    """
+    Récupérer les sessions d'un apprenant.
+    
+    Args:
+        db: Session de base de données
+        learner_id: ID de l'apprenant
+        skip: Nombre de résultats à sauter
+        limit: Nombre maximum de résultats
+    
+    Returns:
+        Liste des sessions
+    """
+    return db.query(SimulationSession).filter(
+        SimulationSession.learner_id == learner_id
+    ).order_by(SimulationSession.start_time.desc()).offset(skip).limit(limit).all()
+
+
+def update_session_stage(
+    db: Session,
+    session_id: UUID,
+    new_stage: str
+) -> Optional[SimulationSession]:
+    """
+    Mettre à jour l'étape courante d'une session.
+    
+    Args:
+        db: Session de base de données
+        session_id: ID de la session
+        new_stage: Nouvelle étape
+    
+    Returns:
+        Session mise à jour ou None
+    """
+    session = get_session_by_id(db, session_id)
+    if not session:
+        return None
+    
+    session.current_stage = new_stage
+    db.commit()
+    db.refresh(session)
+    return session
+
+
+def complete_session(
+    db: Session,
+    session_id: UUID,
+    score_final: float,
+    raison_fin: str = "completed",
+    diagnostic_correct: bool = False
+) -> Optional[SimulationSession]:
+    """
+    Terminer une session de simulation.
+    
+    Args:
+        db: Session de base de données
+        session_id: ID de la session
+        score_final: Score final (0-100)
+        raison_fin: Raison de fin
+        diagnostic_correct: Le diagnostic était-il correct ?
+    
+    Returns:
+        Session terminée ou None
+    """
+    session = get_session_by_id(db, session_id)
+    if not session:
+        return None
+    
+    # Calculer le temps total
+    if session.start_time:
+        temps_total = int((datetime.now() - session.start_time.replace(tzinfo=None)).total_seconds())
+    else:
+        temps_total = 0
+    
+    # Mettre à jour la session
+    session.end_time = func.now()
+    session.temps_total = temps_total
+    session.score_final = score_final
+    session.statut = "termine"
+    session.raison_fin = raison_fin
+    
+    db.commit()
+    db.refresh(session)
+    
+    # Mettre à jour les statistiques du cas
+    from app.services.cas_clinique_service import update_case_statistics
+    update_case_statistics(db, session.cas_clinique_id, score_final, diagnostic_correct)
+    
+    return session
+
+
+def abandon_session(
+    db: Session,
+    session_id: UUID,
+    raison: str = "abandoned"
+) -> Optional[SimulationSession]:
+    """
+    Abandonner une session en cours.
+    
+    Args:
+        db: Session de base de données
+        session_id: ID de la session
+        raison: Raison de l'abandon
+    
+    Returns:
+        Session abandonnée ou None
+    """
+    session = get_session_by_id(db, session_id)
+    if not session:
+        return None
+    
+    session.end_time = func.now()
+    session.statut = "abandonne"
+    session.raison_fin = raison
+    
+    db.commit()
+    db.refresh(session)
+    return session
+
+
+def get_active_session(
+    db: Session,
+    learner_id: int
+) -> Optional[SimulationSession]:
+    """
+    Récupérer la session active d'un apprenant (s'il y en a une).
+    
+    Args:
+        db: Session de base de données
+        learner_id: ID de l'apprenant
+    
+    Returns:
+        Session active ou None
+    """
+    return db.query(SimulationSession).filter(
+        SimulationSession.learner_id == learner_id,
+        SimulationSession.statut == "en_cours"
+    ).first()
+
+
+def get_session_statistics(
+    db: Session,
+    learner_id: int
+) -> dict:
+    """
+    Obtenir les statistiques des sessions d'un apprenant.
+    
+    Args:
+        db: Session de base de données
+        learner_id: ID de l'apprenant
+    
+    Returns:
+        Dictionnaire avec statistiques
+    """
+    sessions = db.query(SimulationSession).filter(
+        SimulationSession.learner_id == learner_id
+    ).all()
+    
+    if not sessions:
+        return {
+            "total_sessions": 0,
+            "completed_sessions": 0,
+            "average_score": 0.0,
+            "total_time_spent": 0
+        }
+    
+    completed = [s for s in sessions if s.statut == "termine"]
+    scores = [s.score_final for s in completed if s.score_final is not None]
+    
+    return {
+        "total_sessions": len(sessions),
+        "completed_sessions": len(completed),
+        "abandoned_sessions": len([s for s in sessions if s.statut == "abandonne"]),
+        "average_score": sum(scores) / len(scores) if scores else 0.0,
+        "best_score": max(scores) if scores else 0.0,
+        "total_time_spent": sum(s.temps_total or 0 for s in completed)
+    }
+
+### FILE: ./knowledge_update_service.py
+
+"""Service de mise à jour du modèle de connaissances (BKT)."""
+
+
+def _clamp01(value: float) -> float:
+    """Borne une probabilité dans [0, 1]."""
+    return max(0.0, min(1.0, value))
+
+
+def score_to_correct(score: float, threshold: float = 50.0) -> bool:
+    """
+    Convertir un score en réussite/échec.
+    
+    Args:
+        score: Score obtenu (0-100)
+        threshold: Seuil de réussite
+    
+    Returns:
+        True si réussite, False sinon
+    """
+    return score >= threshold
+
+
+def bkt_update(
+    p_mastery: float,
+    correct: bool,
+    p_transit: float,
+    p_guess: float,
+    p_slip: float,
+) -> float:
+    """
+    Mise à jour Bayesian Knowledge Tracing (BKT).
+    
+    Args:
+        p_mastery: P(L) - Probabilité de maîtrise actuelle
+        correct: Observation - réponse correcte ?
+        p_transit: P(T) - Probabilité d'apprentissage
+        p_guess: P(G) - Probabilité de deviner
+        p_slip: P(S) - Probabilité d'erreur d'étourderie
+    
+    Returns:
+        Nouvelle probabilité de maîtrise
+    """
+    p_mastery = _clamp01(p_mastery)
+    p_transit = _clamp01(p_transit)
+    p_guess = _clamp01(p_guess)
+    p_slip = _clamp01(p_slip)
+
+    if correct:
+        # Observation = réponse correcte
+        # P(Correct) = P(L)*(1-slip) + (1-P(L))*guess
+        denom = (p_mastery * (1.0 - p_slip)) + ((1.0 - p_mastery) * p_guess)
+        # Posterior: P(L|Correct) = P(L)*P(Correct|L) / P(Correct)
+        p_given_obs = (p_mastery * (1.0 - p_slip)) / denom if denom else p_mastery
+    else:
+        # Observation = réponse incorrecte
+        # P(Incorrect) = P(L)*slip + (1-P(L))*(1-guess)
+        denom = (p_mastery * p_slip) + ((1.0 - p_mastery) * (1.0 - p_guess))
+        # Posterior: P(L|Incorrect) = P(L)*P(Incorrect|L) / P(Incorrect)
+        p_given_obs = (p_mastery * p_slip) / denom if denom else p_mastery
+
+    # Transition (apprentissage entre 2 tentatives)
+    p_next = p_given_obs + (1.0 - p_given_obs) * p_transit
+    return _clamp01(p_next)
+
+
+def update_mastery(
+    current_level: float,
+    score: float,
+    *,
+    correct: bool = None,
+    p_transit: float = 0.15,
+    p_guess: float = 0.2,
+    p_slip: float = 0.1,
+    threshold: float = 50.0,
+) -> float:
+    """
+    Mettre à jour le niveau de maîtrise basé sur un score.
+    
+    Args:
+        current_level: Niveau actuel de maîtrise (0.0 à 1.0)
+        score: Score obtenu (0 à 100)
+        correct: Réponse correcte ? (si None, déduit du score)
+        p_transit: P(T) - Transition/Apprentissage
+        p_guess: P(G) - Guess / Deviner
+        p_slip: P(S) - Slip / Étourderie
+        threshold: Seuil score->correct
+    
+    Returns:
+        Nouveau niveau de maîtrise (0.0 à 1.0)
+    """
+    # Déterminer si la réponse est correcte
+    obs_correct = correct if correct is not None else score_to_correct(score, threshold=threshold)
+
+    # Appliquer BKT
+    return bkt_update(
+        p_mastery=current_level,
+        correct=obs_correct,
+        p_transit=p_transit,
+        p_guess=p_guess,
+        p_slip=p_slip,
+    )
+
+
+def calculate_mastery_from_history(scores: list[float]) -> float:
+    """
+    Calculer le niveau de maîtrise à partir d'une liste de scores.
+    
+    Args:
+        scores: Liste des scores (0 à 100)
+    
+    Returns:
+        Niveau de maîtrise calculé (0.0 à 1.0)
+    """
+    if not scores:
+        return 0.2
+
+    p = 0.2
+    for s in scores:
+        p = update_mastery(p, s)
+    return p
+
+
+def get_mastery_label(mastery_level: float) -> str:
+    """
+    Obtenir un label textuel pour le niveau de maîtrise.
+    
+    Args:
+        mastery_level: Niveau de maîtrise (0.0 à 1.0)
+    
+    Returns:
+        Label descriptif
+    """
+    if mastery_level < 0.2:
+        return "Non maîtrisé"
+    elif mastery_level < 0.4:
+        return "Faiblement maîtrisé"
+    elif mastery_level < 0.6:
+        return "Partiellement maîtrisé"
+    elif mastery_level < 0.8:
+        return "Bien maîtrisé"
+    else:
+        return "Excellemment maîtrisé"
+
+
+def calculate_confidence(
+    nb_success: int,
+    nb_failures: int,
+    streak_correct: int
+) -> float:
+    """
+    Calculer la confiance du système dans l'estimation de maîtrise.
+    
+    Args:
+        nb_success: Nombre de succès
+        nb_failures: Nombre d'échecs
+        streak_correct: Série de réponses correctes
+    
+    Returns:
+        Score de confiance (0.0 à 1.0)
+    """
+    total = nb_success + nb_failures
+    
+    if total == 0:
+        return 0.0
+    
+    # Base de confiance sur le nombre total d'observations
+    base_confidence = min(total / 20.0, 0.8)  # Max 0.8 basé sur volume
+    
+    # Bonus si série de succès
+    streak_bonus = min(streak_correct / 10.0, 0.2)  # Max +0.2
+    
+    return min(base_confidence + streak_bonus, 1.0)
+
+### FILE: ./adaptation_engine.py
+
+"""Moteur d'adaptation intelligente - Orchestration complète."""
+from sqlalchemy.orm import Session
+from sqlalchemy.sql import func
+from typing import List, Dict, Any
+from uuid import UUID
+from app.models.simulation_session import SimulationSession
+from app.models.learner_competency_mastery import LearnerCompetencyMastery
+from app.models.learner_affective import LearnerAffectiveState
+from app.models.learner_behavior import LearnerBehavior
+from app.models.cas_clinique import CasCliniqueEnrichi
+from app.services.knowledge_inference_service import (
+    infer_knowledge_from_interaction,
+    extract_competences_from_actions
+)
+from app.services.affective_service import (
+    update_affective_state,
+    record_affective_state,
+    get_latest_affective_state,
+    get_affective_label
+)
+from app.services.simulation_session_service import complete_session
+from app.services.interaction_log_service import create_interactions_batch
+
+
+def process_simulation_completion(
+    db: Session,
+    session_id: UUID,
+    actions: List[Dict[str, Any]],
+    diagnostic_propose: str,
+    diagnostic_correct: bool
+) -> Dict[str, Any]:
+    """
+    Orchestration complète après une simulation de cas clinique.
+    
+    Flux:
+    1. Enregistrer toutes les actions (InteractionLog)
+    2. Extraire et mettre à jour les maîtrises de compétences (BKT)
+    3. Calculer le score final de la session
+    4. Mettre à jour l'état affectif
+    5. Mettre à jour le comportement
+    6. Générer une recommandation pédagogique
+    
+    Args:
+        db: Session de base de données
+        session_id: ID de la session
+        actions: Liste des actions effectuées
+        diagnostic_propose: Diagnostic proposé par l'apprenant
+        diagnostic_correct: Le diagnostic était-il correct ?
+    
+    Returns:
+        Résultats complets de l'adaptation
+    """
+    # Récupérer la session
+    session = db.query(SimulationSession).filter(SimulationSession.id == session_id).first()
+    if not session:
+        raise ValueError(f"Session {session_id} non trouvée")
+    
+    learner_id = session.learner_id
+    
+    # 1️⃣ Enregistrer les actions (batch)
+    if actions:
+        create_interactions_batch(db, session_id, actions)
+    
+    # 2️⃣ Extraire les compétences sollicitées et leurs scores
+    competence_scores = extract_competences_from_actions(db, session_id)
+    
+    # Mettre à jour les maîtrises (BKT)
+    updated_masteries = []
+    for comp_id, scores in competence_scores.items():
+        avg_score = sum(scores) / len(scores) if scores else 0
+        mastery = infer_knowledge_from_interaction(db, learner_id, comp_id, avg_score)
+        updated_masteries.append({
+            "competence_id": comp_id,
+            "mastery_level": round(mastery.mastery_level or 0, 2),
+            "confidence": round(mastery.confidence or 0, 2)
+        })
+    
+    # 3️⃣ Calculer le score final de la session
+    score_final = _calculate_session_score(
+        competence_scores,
+        diagnostic_correct,
+        actions
+    )
+    
+    # 4️⃣ Terminer la session
+    session = complete_session(db, session_id, score_final, "completed", diagnostic_correct)
+    
+    # 5️⃣ Mettre à jour l'état affectif
+    affective_result = _update_session_affective_state(db, session_id, learner_id, score_final)
+    
+    # 6️⃣ Mettre à jour le comportement
+    _update_learner_behavior(db, learner_id, session.temps_total or 0)
+    
+    # 7️⃣ Générer la recommandation pédagogique
+    recommendation = _generate_pedagogical_recommendation(
+        db,
+        learner_id,
+        score_final,
+        updated_masteries,
+        affective_result
+    )
+    
+    # 8️⃣ Déterminer l'action suivante
+    next_action = _get_next_action(
+        score_final,
+        updated_masteries,
+        affective_result
+    )
+    
+    return {
+        "session_id": str(session_id),
+        "learner_id": learner_id,
+        "cas_clinique_id": session.cas_clinique_id,
+        "score_final": score_final,
+        "diagnostic_correct": diagnostic_correct,
+        "temps_total": session.temps_total,
+        "competences_updated": updated_masteries,
+        "affective_state": affective_result,
+        "recommendation": recommendation,
+        "next_action": next_action
+    }
+
+
+def _calculate_session_score(
+    competence_scores: Dict[int, List[float]],
+    diagnostic_correct: bool,
+    actions: List[Dict[str, Any]]
+) -> float:
+    """
+    Calculer le score final d'une session.
+    
+    Args:
+        competence_scores: Scores par compétence
+        diagnostic_correct: Diagnostic correct ?
+        actions: Liste des actions
+    
+    Returns:
+        Score final (0-100)
+    """
+    if not competence_scores:
+        # Si pas de compétences évaluées, se baser sur le diagnostic
+        return 80.0 if diagnostic_correct else 20.0
+    
+    # Calculer la moyenne des scores des compétences
+    all_scores = []
+    for scores in competence_scores.values():
+        all_scores.extend(scores)
+    
+    avg_competence_score = sum(all_scores) / len(all_scores) if all_scores else 50.0
+    
+    # Pondération : 60% compétences, 40% diagnostic
+    diagnostic_score = 100.0 if diagnostic_correct else 0.0
+    final_score = (avg_competence_score * 0.6) + (diagnostic_score * 0.4)
+    
+    return round(min(100.0, max(0.0, final_score)), 2)
+
+
+def _update_session_affective_state(
+    db: Session,
+    session_id: UUID,
+    learner_id: int,
+    score: float
+) -> Dict[str, Any]:
+    """
+    Mettre à jour l'état affectif basé sur la performance de la session.
+    
+    Args:
+        db: Session de base de données
+        session_id: ID de la session
+        learner_id: ID de l'apprenant
+        score: Score final de la session
+    
+    Returns:
+        État affectif mis à jour
+    """
+    # Récupérer le dernier état affectif (si existe)
+    latest = get_latest_affective_state(db, session_id)
+    
+    if latest:
+        # Mettre à jour basé sur l'état précédent
+        motivation, frustration, confidence, stress = update_affective_state(
+            latest.motivation_level or 0.5,
+            latest.frustration_level or 0.0,
+            latest.confidence_level or 0.5,
+            latest.stress_level or 0.0,
+            score
+        )
+    else:
+        # Créer un état initial basé sur le score
+        motivation, frustration, confidence, stress = update_affective_state(
+            0.5, 0.0, 0.5, 0.0, score
+        )
+    
+    # Enregistrer le nouvel état
+    new_affective = record_affective_state(
+        db,
+        session_id,
+        stress,
+        confidence,
+        motivation,
+        frustration
+    )
+    
+    return {
+        "motivation": motivation,
+        "frustration": frustration,
+        "confidence": confidence,
+        "stress": stress,
+        "label": get_affective_label(motivation, frustration, confidence, stress)
+    }
+
+
+def _update_learner_behavior(
+    db: Session,
+    learner_id: int,
+    session_time: int
+) -> None:
+    """
+    Mettre à jour le profil comportemental de l'apprenant.
+    
+    Args:
+        db: Session de base de données
+        learner_id: ID de l'apprenant
+        session_time: Temps de la session en secondes
+    """
+    from app.services.behavior_service import compute_engagement
+    
+    # Récupérer ou créer le profil comportemental
+    behavior = db.query(LearnerBehavior).filter(
+        LearnerBehavior.learner_id == learner_id
+    ).first()
+    
+    if not behavior:
+        behavior = LearnerBehavior(
+            learner_id=learner_id,
+            sessions_count=0,
+            activities_count=0,
+            total_time_spent=0
+        )
+        db.add(behavior)
+    
+    # Mettre à jour les compteurs
+    behavior.sessions_count = (behavior.sessions_count or 0) + 1
+    behavior.activities_count = (behavior.activities_count or 0) + 1  # Une session = une activité
+    behavior.total_time_spent = (behavior.total_time_spent or 0) + session_time
+    
+    # Recalculer le score d'engagement
+    behavior.engagement_score = compute_engagement(
+        behavior.sessions_count,
+        behavior.activities_count,
+        behavior.total_time_spent
+    )
+    
+    db.commit()
+
+
+def _generate_pedagogical_recommendation(
+    db: Session,
+    learner_id: int,
+    score: float,
+    masteries: List[Dict],
+    affective: Dict
+) -> str:
+    """
+    Générer une recommandation pédagogique personnalisée.
+    
+    Args:
+        db: Session de base de données
+        learner_id: ID de l'apprenant
+        score: Score obtenu
+        masteries: Maîtrises de compétences
+        affective: État affectif
+    
+    Returns:
+        Recommandation textuelle
+    """
+    # Calculer le niveau moyen de maîtrise
+    if masteries:
+        avg_mastery = sum(m["mastery_level"] for m in masteries) / len(masteries)
+    else:
+        avg_mastery = 0.5
+    
+    # Récupérer l'état affectif
+    frustration = affective.get("frustration", 0.0)
+    motivation = affective.get("motivation", 0.5)
+    confidence = affective.get("confidence", 0.5)
+    
+    # Décision pédagogique basée sur le score et l'état
+    if score < 40:
+        if frustration > 0.7:
+            return "Score faible avec forte frustration. Recommandation : Revoir les concepts de base avec des cas très guidés et beaucoup d'encouragements. Prendre une pause si nécessaire."
+        else:
+            return "Score faible. Recommandation : Reprendre les fondamentaux avec des cas de niveau 1 et un tutorat renforcé."
+    
+    elif score < 60:
+        if avg_mastery < 0.4:
+            return "Score moyen avec maîtrise faible. Recommandation : Se concentrer sur les compétences faibles identifiées avec des exercices ciblés."
+        else:
+            return "Score moyen. Recommandation : Continuer à pratiquer sur des cas de même niveau pour consolider les acquis."
+    
+    elif score < 80:
+        if confidence < 0.5:
+            return "Bon score mais confiance faible. Recommandation : Renforcer la confiance avec plus de pratique sur le même niveau avant de progresser."
+        else:
+            return "Bonne performance ! Recommandation : Prêt pour des cas légèrement plus complexes. Continuer sur cette dynamique."
+    
+    else:  # score >= 80
+        if avg_mastery >= 0.8 and motivation > 0.7:
+            return "Excellente performance avec forte maîtrise ! Recommandation : Passer au niveau supérieur et explorer des cas plus complexes ou des spécialisations."
+        else:
+            return "Excellente performance ! Recommandation : Consolider cette maîtrise avec quelques cas similaires puis progresser vers le niveau suivant."
+
+
+def _get_next_action(
+    score: float,
+    masteries: List[Dict],
+    affective:
+
+### FILE: ./learner_service.py
+
+"""Service métier pour les apprenants."""
+from sqlalchemy.orm import Session
+from app.models.learner import Learner
+from app.schemas.learner import LearnerCreate, LearnerUpdate
+
+
+class LearnerService:
+    """Service pour gérer les apprenants."""
+    
+    @staticmethod
+    def create_learner(db: Session, learner: LearnerCreate) -> Learner:
+        """Créer un nouvel apprenant."""
+        db_learner = Learner(**learner.dict())
+        db.add(db_learner)
+        db.commit()
+        db.refresh(db_learner)
+        return db_learner
+    
+    @staticmethod
+    def get_learner(db: Session, learner_id: int) -> Learner:
+        """Récupérer un apprenant par ID."""
+        return db.query(Learner).filter(Learner.id == learner_id).first()
+    
+    @staticmethod
+    def get_learners(db: Session, skip: int = 0, limit: int = 10) -> list[Learner]:
+        """Récupérer la liste des apprenants."""
+        return db.query(Learner).offset(skip).limit(limit).all()
+    
+    @staticmethod
+    def update_learner(db: Session, learner_id: int, learner_update: LearnerUpdate) -> Learner:
+        """Mettre à jour un apprenant."""
+        db_learner = db.query(Learner).filter(Learner.id == learner_id).first()
+        if db_learner:
+            update_data = learner_update.dict(exclude_unset=True)
+            for field, value in update_data.items():
+                setattr(db_learner, field, value)
+            db.commit()
+            db.refresh(db_learner)
+        return db_learner
+    
+    @staticmethod
+    def delete_learner(db: Session, learner_id: int) -> bool:
+        """Supprimer un apprenant."""
+        db_learner = db.query(Learner).filter(Learner.id == learner_id).first()
+        if db_learner:
+            db.delete(db_learner)
+            db.commit()
+            return True
+        return False
+
+
+### FILE: ./pathologie_service.py
+
+"""Service pour les pathologies."""
+from sqlalchemy.orm import Session
+from typing import List, Optional
+from app.models.pathologie import Pathologie
+
+
+def get_all_pathologies(
+    db: Session,
+    skip: int = 0,
+    limit: int = 100,
+    categorie: Optional[str] = None
+) -> List[Pathologie]:
+    """
+    Récupérer toutes les pathologies avec filtres.
+    
+    Args:
+        db: Session de base de données
+        skip: Nombre de résultats à sauter
+        limit: Nombre maximum de résultats
+        categorie: Filtrer par catégorie
+    
+    Returns:
+        Liste des pathologies
+    """
+    query = db.query(Pathologie)
+    
+    if categorie:
+        query = query.filter(Pathologie.categorie == categorie)
+    
+    return query.offset(skip).limit(limit).all()
+
+
+def get_pathologie_by_id(db: Session, pathologie_id: int) -> Optional[Pathologie]:
+    """
+    Récupérer une pathologie par ID.
+    
+    Args:
+        db: Session de base de données
+        pathologie_id: ID de la pathologie
+    
+    Returns:
+        Pathologie ou None
+    """
+    return db.query(Pathologie).filter(Pathologie.id == pathologie_id).first()
+
+
+def get_pathologie_by_icd10(db: Session, code_icd10: str) -> Optional[Pathologie]:
+    """
+    Récupérer une pathologie par code ICD10.
+    
+    Args:
+        db: Session de base de données
+        code_icd10: Code ICD10
+    
+    Returns:
+        Pathologie ou None
+    """
+    return db.query(Pathologie).filter(Pathologie.code_icd10 == code_icd10).first()
+
+
+def search_pathologies(
+    db: Session,
+    search_term: str,
+    limit: int = 20
+) -> List[Pathologie]:
+    """
+    Rechercher des pathologies par nom.
+    
+    Args:
+        db: Session de base de données
+        search_term: Terme de recherche
+        limit: Nombre maximum de résultats
+    
+    Returns:
+        Liste des pathologies trouvées
+    """
+    search_pattern = f"%{search_term}%"
+    return db.query(Pathologie).filter(
+        Pathologie.nom_fr.ilike(search_pattern)
+    ).limit(limit).all()
+
+
+def get_pathologies_by_gravite(
+    db: Session,
+    niveau_min: int,
+    niveau_max: int = 5
+) -> List[Pathologie]:
+    """
+    Récupérer les pathologies par niveau de gravité.
+    
+    Args:
+        db: Session de base de données
+        niveau_min: Niveau minimum de gravité
+        niveau_max: Niveau maximum de gravité
+    
+    Returns:
+        Liste des pathologies
+    """
+    return db.query(Pathologie).filter(
+        Pathologie.niveau_gravite >= niveau_min,
+        Pathologie.niveau_gravite <= niveau_max
+    ).all()
+
+### FILE: ./update_engine.py
+
+"""Moteur de mise à jour pour les apprenants (IA / règles)."""
+from sqlalchemy.orm import Session
+from app.models.learner import Learner
+from app.models.performance import Performance
+
+
+class UpdateEngine:
+    """Moteur pour mettre à jour les profils d'apprenants basé sur les performances et états affectifs."""
+    
+    @staticmethod
+    def update_learner_progress(db: Session, learner_id: int) -> float:
+        """Calculer et mettre à jour la progression d'un apprenant."""
+        performances = db.query(Performance).filter(
+            Performance.learner_id == learner_id
+        ).all()
+        
+        if not performances:
+            return 0.0
+        
+        total_score = sum(p.score for p in performances)
+        average_score = total_score / len(performances)
+        
+        learner = db.query(Learner).filter(Learner.id == learner_id).first()
+        if learner:
+            learner.progress = average_score
+            db.commit()
+        
+        return average_score
+    
+    @staticmethod
+    def adjust_difficulty(db: Session, learner_id: int) -> str:
+        """Ajuster le niveau de difficulté basé sur les performances."""
+        learner = db.query(Learner).filter(Learner.id == learner_id).first()
+        if not learner:
+            return "beginner"
+        
+        progress = UpdateEngine.update_learner_progress(db, learner_id)
+        
+        if progress >= 0.8:
+            new_level = "advanced"
+        elif progress >= 0.6:
+            new_level = "intermediate"
+        else:
+            new_level = "beginner"
+        
+        learner.level = new_level
+        db.commit()
+        
+        return new_level
+
+
+### FILE: ./knowledge_inference_service.py
+
+"""Service d'inférence des connaissances à partir des interactions."""
+from sqlalchemy.orm import Session
+from sqlalchemy.sql import func
+from typing import List, Dict, Any
+from uuid import UUID
+from app.models.learner_competency_mastery import LearnerCompetencyMastery
+from app.models.competence_clinique import CompetenceClinique
+from app.models.interaction_log import InteractionLog
+from app.services.knowledge_update_service import update_mastery, calculate_confidence
+
+
+def infer_knowledge_from_interaction(
+    db: Session,
+    learner_id: int,
+    competence_id: int,
+    score: float,
+    correct: bool = None
+) -> LearnerCompetencyMastery:
+    """
+    Mettre à jour la maîtrise d'une compétence basée sur une interaction.
+    
+    Args:
+        db: Session de base de données
+        learner_id: ID de l'apprenant
+        competence_id: ID de la compétence
+        score: Score obtenu (0-100)
+        correct: Réponse correcte ? (optionnel)
+    
+    Returns:
+        LearnerCompetencyMastery mis à jour
+    """
+    # Récupérer la compétence pour les paramètres BKT
+    competence = db.query(CompetenceClinique).filter(CompetenceClinique.id == competence_id).first()
+    
+    # Récupérer ou créer l'enregistrement de maîtrise
+    mastery = db.query(LearnerCompetencyMastery).filter(
+        LearnerCompetencyMastery.learner_id == learner_id,
+        LearnerCompetencyMastery.competence_id == competence_id
+    ).first()
+    
+    if not mastery:
+        mastery = LearnerCompetencyMastery(
+            learner_id=learner_id,
+            competence_id=competence_id,
+            mastery_level=competence.p_init if competence else 0.2,
+            nb_success=0,
+            nb_failures=0,
+            streak_correct=0
+        )
+        db.add(mastery)
+        db.flush()
+    
+    # Mettre à jour les statistiques
+    is_correct = correct if correct is not None else (score >= 50)
+    
+    if is_correct:
+        mastery.nb_success = (mastery.nb_success or 0) + 1
+        mastery.streak_correct = (mastery.streak_correct or 0) + 1
+    else:
+        mastery.nb_failures = (mastery.nb_failures or 0) + 1
+        mastery.streak_correct = 0
+    
+    # Mettre à jour le niveau de maîtrise avec BKT
+    if competence:
+        new_mastery = update_mastery(
+            mastery.mastery_level or 0.2,
+            score,
+            correct=correct,
+            p_transit=competence.p_transit,
+            p_guess=competence.p_guess,
+            p_slip=competence.p_slip,
+        )
+    else:
+        new_mastery = update_mastery(mastery.mastery_level or 0.2, score, correct=correct)
+    
+    mastery.mastery_level = new_mastery
+    mastery.last_practice_date = func.now()
+    
+    # Calculer la confiance
+    mastery.confidence = calculate_confidence(
+        mastery.nb_success or 0,
+        mastery.nb_failures or 0,
+        mastery.streak_correct or 0
+    )
+    
+    db.commit()
+    db.refresh(mastery)
+    return mastery
+
+
+def infer_knowledge_from_session(
+    db: Session,
+    session_id: UUID,
+    competence_scores: Dict[int, float]
+) -> List[LearnerCompetencyMastery]:
+    """
+    Mettre à jour les maîtrises basées sur toutes les interactions d'une session.
+    
+    Args:
+        db: Session de base de données
+        session_id: ID de la session
+        competence_scores: Dictionnaire {competence_id: score}
+    
+    Returns:
+        Liste des maîtrises mises à jour
+    """
+    from app.models.simulation_session import SimulationSession
+    
+    # Récupérer la session
+    session = db.query(SimulationSession).filter(SimulationSession.id == session_id).first()
+    if not session:
+        raise ValueError(f"Session {session_id} non trouvée")
+    
+    updated_masteries = []
+    
+    for competence_id, score in competence_scores.items():
+        mastery = infer_knowledge_from_interaction(
+            db,
+            session.learner_id,
+            competence_id,
+            score
+        )
+        updated_masteries.append(mastery)
+    
+    return updated_masteries
+
+
+def extract_competences_from_actions(
+    db: Session,
+    session_id: UUID
+) -> Dict[int, List[float]]:
+    """
+    Extraire les compétences sollicitées et leurs scores depuis les interactions.
+    
+    Args:
+        db: Session de base de données
+        session_id: ID de la session
+    
+    Returns:
+        Dictionnaire {competence_id: [liste de scores]}
+    """
+    interactions = db.query(InteractionLog).filter(
+        InteractionLog.session_id == session_id
+    ).all()
+    
+    competence_scores: Dict[int, List[float]] = {}
+    
+    for interaction in interactions:
+        if not interaction.action_content:
+            continue
+        
+        # Extraire competence_id et score du contenu JSON
+        content = interaction.action_content
+        if isinstance(content, dict):
+            comp_id = content.get('competence_id')
+            score = content.get('score')
+            
+            if comp_id and score is not None:
+                if comp_id not in competence_scores:
+                    competence_scores[comp_id] = []
+                competence_scores[comp_id].append(float(score))
+    
+    return competence_scores
+
+
+def get_learner_knowledge_summary(
+    db: Session,
+    learner_id: int
+) -> Dict[str, Any]:
+    """
+    Obtenir un résumé des connaissances d'un apprenant.
+    
+    Args:
+        db: Session de base de données
+        learner_id: ID de l'apprenant
+    
+    Returns:
+        Dictionnaire avec statistiques
+    """
+    masteries = db.query(LearnerCompetencyMastery).filter(
+        LearnerCompetencyMastery.learner_id == learner_id
+    ).all()
+    
+    if not masteries:
+        return {
+            "learner_id": learner_id,
+            "total_competences": 0,
+            "average_mastery": 0.0,
+            "mastered_competences": 0,
+            "competences": []
+        }
+    
+    total_mastery = sum(m.mastery_level or 0 for m in masteries)
+    average_mastery = total_mastery / len(masteries)
+    mastered = sum(1 for m in masteries if (m.mastery_level or 0) >= 0.8)
+    
+    # Détails par compétence
+    competences_details = []
+    for m in masteries:
+        comp = db.query(CompetenceClinique).filter(CompetenceClinique.id == m.competence_id).first()
+        competences_details.append({
+            "competence_id": m.competence_id,
+            "competence_code": comp.code_competence if comp else "Unknown",
+            "competence_nom": comp.nom if comp else "Unknown",
+            "mastery_level": round(m.mastery_level or 0, 2),
+            "confidence": round(m.confidence or 0, 2),
+            "nb_success": m.nb_success or 0,
+            "nb_failures": m.nb_failures or 0,
+            "last_practice": m.last_practice_date
+        })
+    
+    # Trier par niveau de maîtrise décroissant
+    competences_details.sort(key=lambda x: x["mastery_level"], reverse=True)
+    
+    return {
+        "learner_id": learner_id,
+        "total_competences": len(masteries),
+        "average_mastery": round(average_mastery, 2),
+        "mastered_competences": mastered,
+        "competences": competences_details
+    }
+
+
+def identify_weak_competences(
+    db: Session,
+    learner_id: int,
+    threshold: float = 0.5
+) -> List[Dict[str, Any]]:
+    """
+    Identifier les compétences faibles d'un apprenant.
+    
+    Args:
+        db: Session de base de données
+        learner_id: ID de l'apprenant
+        threshold: Seuil de maîtrise
+    
+    Returns:
+        Liste des compétences faibles
+    """
+    masteries = db.query(LearnerCompetencyMastery).filter(
+        LearnerCompetencyMastery.learner_id == learner_id,
+        LearnerCompetencyMastery.mastery_level < threshold
+    ).all()
+    
+    weak_competences = []
+    for m in masteries:
+        comp = db.query(CompetenceClinique).filter(CompetenceClinique.id == m.competence_id).first()
+        weak_competences.append({
+            "competence_id": m.competence_id,
+            "competence_code": comp.code_competence if comp else "Unknown",
+            "competence_nom": comp.nom if comp else "Unknown",
+            "mastery_level": round(m.mastery_level or 0, 2),
+            "nb_failures": m.nb_failures or 0,
+            "priority": "haute" if (m.mastery_level or 0) < 0.3 else "moyenne"
+        })
+    
+    # Trier par niveau de maîtrise croissant (les plus faibles en premier)
+    weak_competences.sort(key=lambda x: x["mastery_level"])
+    
+    return weak_competences
+
+### FILE: ./competence_service.py
+
+"""Service pour les compétences cliniques."""
+from sqlalchemy.orm import Session
+from typing import List, Optional, Set
+from app.models.competence_clinique import CompetenceClinique
+from app.models.prerequis_competence import PrerequisCompetence
+
+
+def get_all_competences(
+    db: Session,
+    skip: int = 0,
+    limit: int = 100,
+    categorie: Optional[str] = None
+) -> List[CompetenceClinique]:
+    """
+    Récupérer toutes les compétences avec filtres.
+    
+    Args:
+        db: Session de base de données
+        skip: Nombre de résultats à sauter
+        limit: Nombre maximum de résultats
+        categorie: Filtrer par catégorie
+    
+    Returns:
+        Liste des compétences
+    """
+    query = db.query(CompetenceClinique)
+    
+    if categorie:
+        query = query.filter(CompetenceClinique.categorie == categorie)
+    
+    return query.order_by(CompetenceClinique.ordre_apprentissage).offset(skip).limit(limit).all()
+
+
+def get_competence_by_id(db: Session, competence_id: int) -> Optional[CompetenceClinique]:
+    """
+    Récupérer une compétence par ID.
+    
+    Args:
+        db: Session de base de données
+        competence_id: ID de la compétence
+    
+    Returns:
+        Compétence ou None
+    """
+    return db.query(CompetenceClinique).filter(CompetenceClinique.id == competence_id).first()
+
+
+def get_competence_by_code(db: Session, code_competence: str) -> Optional[CompetenceClinique]:
+    """
+    Récupérer une compétence par code.
+    
+    Args:
+        db: Session de base de données
+        code_competence: Code de la compétence
+    
+    Returns:
+        Compétence ou None
+    """
+    return db.query(CompetenceClinique).filter(
+        CompetenceClinique.code_competence == code_competence
+    ).first()
+
+
+def get_prerequis_for_competence(
+    db: Session,
+    competence_id: int
+) -> List[CompetenceClinique]:
+    """
+    Récupérer les prérequis d'une compétence.
+    
+    Args:
+        db: Session de base de données
+        competence_id: ID de la compétence
+    
+    Returns:
+        Liste des compétences prérequises
+    """
+    prerequis_relations = db.query(PrerequisCompetence).filter(
+        PrerequisCompetence.competence_id == competence_id
+    ).all()
+    
+    prerequis_ids = [rel.prerequis_id for rel in prerequis_relations]
+    
+    if not prerequis_ids:
+        return []
+    
+    return db.query(CompetenceClinique).filter(
+        CompetenceClinique.id.in_(prerequis_ids)
+    ).all()
+
+
+def get_competences_depending_on(
+    db: Session,
+    competence_id: int
+) -> List[CompetenceClinique]:
+    """
+    Récupérer les compétences qui dépendent de cette compétence.
+    
+    Args:
+        db: Session de base de données
+        competence_id: ID de la compétence
+    
+    Returns:
+        Liste des compétences dépendantes
+    """
+    dependent_relations = db.query(PrerequisCompetence).filter(
+        PrerequisCompetence.prerequis_id == competence_id
+    ).all()
+    
+    dependent_ids = [rel.competence_id for rel in dependent_relations]
+    
+    if not dependent_ids:
+        return []
+    
+    return db.query(CompetenceClinique).filter(
+        CompetenceClinique.id.in_(dependent_ids)
+    ).all()
+
+
+def check_prerequisites_met(
+    db: Session,
+    competence_id: int,
+    learner_id: int,
+    threshold: float = 0.7
+) -> bool:
+    """
+    Vérifier si un apprenant a les prérequis pour une compétence.
+    
+    Args:
+        db: Session de base de données
+        competence_id: ID de la compétence cible
+        learner_id: ID de l'apprenant
+        threshold: Seuil de maîtrise requis
+    
+    Returns:
+        True si tous les prérequis sont maîtrisés
+    """
+    from app.models.learner_competency_mastery import LearnerCompetencyMastery
+    
+    prerequis = get_prerequis_for_competence(db, competence_id)
+    
+    if not prerequis:
+        return True  # Pas de prérequis
+    
+    for prereq in prerequis:
+        mastery = db.query(LearnerCompetencyMastery).filter(
+            LearnerCompetencyMastery.learner_id == learner_id,
+            LearnerCompetencyMastery.competence_id == prereq.id
+        ).first()
+        
+        if not mastery or (mastery.mastery_level or 0) < threshold:
+            return False
+    
+    return True
+
+
+def get_learning_path(
+    db: Session,
+    target_competence_id: int
+) -> List[CompetenceClinique]:
+    """
+    Construire un chemin d'apprentissage pour atteindre une compétence.
+    
+    Args:
+        db: Session de base de données
+        target_competence_id: ID de la compétence cible
+    
+    Returns:
+        Liste ordonnée des compétences à maîtriser
+    """
+    visited: Set[int] = set()
+    path: List[CompetenceClinique] = []
+    
+    def traverse(comp_id: int):
+        if comp_id in visited:
+            return
+        
+        visited.add(comp_id)
+        
+        # Récupérer les prérequis
+        prerequis = get_prerequis_for_competence(db, comp_id)
+        
+        # Traverser récursivement les prérequis
+        for prereq in prerequis:
+            traverse(prereq.id)
+        
+        # Ajouter la compétence courante
+        comp = get_competence_by_id(db, comp_id)
+        if comp:
+            path.append(comp)
+    
+    traverse(target_competence_id)
+    return path

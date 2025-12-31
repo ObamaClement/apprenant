@@ -1,0 +1,1062 @@
+
+
+### FILE: ./competence_clinique.py
+
+"""Schémas Pydantic pour les compétences cliniques."""
+from pydantic import BaseModel
+from typing import Optional, Dict, Any, List
+from datetime import datetime
+
+
+class CompetenceCliniqueBase(BaseModel):
+    """Schéma de base pour une compétence clinique."""
+    code_competence: str
+    nom: str
+    categorie: Optional[str] = None
+    niveau_bloom: Optional[int] = None
+    description: Optional[str] = None
+    objectifs_apprentissage: Optional[Dict[str, Any]] = None
+    criteres_maitrise: Optional[Dict[str, Any]] = None
+    parent_competence_id: Optional[int] = None
+    ordre_apprentissage: Optional[int] = None
+
+
+class CompetenceCliniqueCreate(CompetenceCliniqueBase):
+    """Schéma pour créer une compétence clinique."""
+    pass
+
+
+class CompetenceCliniqueUpdate(BaseModel):
+    """Schéma pour mettre à jour une compétence clinique."""
+    nom: Optional[str] = None
+    categorie: Optional[str] = None
+    niveau_bloom: Optional[int] = None
+    description: Optional[str] = None
+    objectifs_apprentissage: Optional[Dict[str, Any]] = None
+    criteres_maitrise: Optional[Dict[str, Any]] = None
+    parent_competence_id: Optional[int] = None
+    ordre_apprentissage: Optional[int] = None
+
+
+class CompetenceCliniqueResponse(CompetenceCliniqueBase):
+    """Schéma de réponse pour une compétence clinique."""
+    id: int
+    created_at: datetime
+    
+    # Propriétés de compatibilité avec Concept
+    @property
+    def name(self) -> str:
+        return self.code_competence
+    
+    @property
+    def p_init(self) -> float:
+        return 0.2
+    
+    @property
+    def p_transit(self) -> float:
+        return 0.15
+    
+    @property
+    def p_guess(self) -> float:
+        return 0.2
+    
+    @property
+    def p_slip(self) -> float:
+        return 0.1
+
+    class Config:
+        from_attributes = True
+
+
+# Schéma enrichi avec prérequis
+class CompetenceCliniqueWithPrerequisResponse(CompetenceCliniqueResponse):
+    """Schéma enrichi avec les prérequis."""
+    prerequis_ids: Optional[List[int]] = []
+    
+    class Config:
+        from_attributes = True
+
+### FILE: ./learner_affective.py
+
+"""Schémas Pydantic pour l'état affectif de l'apprenant."""
+from pydantic import BaseModel, Field
+from datetime import datetime
+from typing import Optional
+from uuid import UUID
+
+
+class LearnerAffectiveBase(BaseModel):
+    """Schéma de base pour l'état affectif."""
+    session_id: UUID
+    stress_level: Optional[float] = Field(None, ge=0.0, le=1.0)
+    confidence_level: Optional[float] = Field(None, ge=0.0, le=1.0)
+    motivation_level: Optional[float] = Field(None, ge=0.0, le=1.0)
+    frustration_level: Optional[float] = Field(None, ge=0.0, le=1.0)
+
+
+class LearnerAffectiveCreate(LearnerAffectiveBase):
+    """Schéma pour créer un état affectif."""
+    pass
+
+
+class LearnerAffectiveUpdate(BaseModel):
+    """Schéma pour mettre à jour l'état affectif."""
+    stress_level: Optional[float] = Field(None, ge=0.0, le=1.0)
+    confidence_level: Optional[float] = Field(None, ge=0.0, le=1.0)
+    motivation_level: Optional[float] = Field(None, ge=0.0, le=1.0)
+    frustration_level: Optional[float] = Field(None, ge=0.0, le=1.0)
+
+
+class LearnerAffectiveResponse(LearnerAffectiveBase):
+    """Schéma de réponse pour l'état affectif."""
+    id: int
+    timestamp: datetime
+    
+    # Propriétés de compatibilité
+    @property
+    def stress(self) -> Optional[float]:
+        return self.stress_level
+    
+    @property
+    def confidence(self) -> Optional[float]:
+        return self.confidence_level
+    
+    @property
+    def motivation(self) -> Optional[float]:
+        return self.motivation_level
+    
+    @property
+    def frustration(self) -> Optional[float]:
+        return self.frustration_level
+
+    class Config:
+        from_attributes = True
+
+### FILE: ./learner_competency.py
+
+"""Schémas Pydantic pour la maîtrise des compétences."""
+from pydantic import BaseModel, Field
+from typing import Optional
+from datetime import datetime
+
+
+class LearnerCompetencyMasteryBase(BaseModel):
+    """Schéma de base pour la maîtrise d'une compétence."""
+    learner_id: int
+    competence_id: int
+    mastery_level: Optional[float] = Field(None, ge=0.0, le=1.0)
+    confidence: Optional[float] = Field(None, ge=0.0, le=1.0)
+
+
+class LearnerCompetencyMasteryCreate(LearnerCompetencyMasteryBase):
+    """Schéma pour créer un enregistrement de maîtrise."""
+    pass
+
+
+class LearnerCompetencyMasteryUpdate(BaseModel):
+    """Schéma pour mettre à jour la maîtrise."""
+    mastery_level: Optional[float] = Field(None, ge=0.0, le=1.0)
+    confidence: Optional[float] = Field(None, ge=0.0, le=1.0)
+    nb_success: Optional[int] = None
+    nb_failures: Optional[int] = None
+    streak_correct: Optional[int] = None
+
+
+class LearnerCompetencyMasteryResponse(LearnerCompetencyMasteryBase):
+    """Schéma de réponse pour la maîtrise."""
+    id: int
+    last_practice_date: Optional[datetime] = None
+    nb_success: Optional[int] = None
+    nb_failures: Optional[int] = None
+    streak_correct: Optional[int] = None
+
+    class Config:
+        from_attributes = True
+
+
+# Schéma enrichi avec info de compétence
+class LearnerCompetencyMasteryWithCompetence(LearnerCompetencyMasteryResponse):
+    """Schéma enrichi avec les détails de la compétence."""
+    competence_code: Optional[str] = None
+    competence_nom: Optional[str] = None
+    competence_categorie: Optional[str] = None
+
+    class Config:
+        from_attributes = True
+
+### FILE: ./cas_clinique.py
+
+"""Schémas Pydantic pour les cas cliniques."""
+from pydantic import BaseModel, Field
+from typing import Optional, Dict, Any, List
+from datetime import date, datetime
+from decimal import Decimal
+
+
+class CasCliniqueBase(BaseModel):
+    """Schéma de base pour un cas clinique."""
+    code_fultang: Optional[str] = None
+    pathologie_principale_id: Optional[int] = None
+    presentation_clinique: Dict[str, Any]
+    donnees_paracliniques: Optional[Dict[str, Any]] = None
+    niveau_difficulte: Optional[int] = Field(None, ge=1, le=5)
+    duree_estimee_resolution_min: Optional[int] = None
+    objectifs_apprentissage: Optional[Dict[str, Any]] = None
+    competences_requises: Optional[Dict[str, Any]] = None
+
+
+class CasCliniqueCreate(CasCliniqueBase):
+    """Schéma pour créer un cas clinique."""
+    pass
+
+
+class CasCliniqueUpdate(BaseModel):
+    """Schéma pour mettre à jour un cas clinique."""
+    presentation_clinique: Optional[Dict[str, Any]] = None
+    donnees_paracliniques: Optional[Dict[str, Any]] = None
+    niveau_difficulte: Optional[int] = Field(None, ge=1, le=5)
+    duree_estimee_resolution_min: Optional[int] = None
+    valide_expert: Optional[bool] = None
+    qualite_donnees: Optional[int] = None
+
+
+class CasCliniqueResponse(CasCliniqueBase):
+    """Schéma de réponse pour un cas clinique."""
+    id: int
+    hash_integrite: Optional[str] = None
+    evolution_patient: Optional[str] = None
+    images_associees_ids: Optional[List[int]] = None
+    medicaments_prescrits: Optional[Dict[str, Any]] = None
+    valide_expert: Optional[bool] = None
+    date_validation: Optional[date] = None
+    qualite_donnees: Optional[int] = None
+    nb_utilisations: Optional[int] = None
+    note_moyenne_apprenants: Optional[Decimal] = None
+    taux_succes_diagnostic: Optional[Decimal] = None
+    created_at: datetime
+    updated_at: datetime
+    pathologies_secondaires_ids: Optional[List[int]] = None
+
+    class Config:
+        from_attributes = True
+
+
+# Schéma simplifié pour liste
+class CasCliniqueListResponse(BaseModel):
+    """Schéma simplifié pour liste de cas."""
+    id: int
+    code_fultang: Optional[str] = None
+    pathologie_principale_id: Optional[int] = None
+    niveau_difficulte: Optional[int] = None
+    duree_estimee_resolution_min: Optional[int] = None
+    valide_expert: Optional[bool] = None
+    nb_utilisations: Optional[int] = None
+    note_moyenne_apprenants: Optional[Decimal] = None
+    
+    class Config:
+        from_attributes = True
+
+### FILE: ./prerequis_competence.py
+
+"""Schémas Pydantic pour les prérequis entre compétences."""
+from pydantic import BaseModel, Field
+from typing import Optional
+from decimal import Decimal
+
+
+class PrerequisCompetenceBase(BaseModel):
+    """Schéma de base pour un prérequis."""
+    competence_id: int
+    prerequis_id: int
+    type_relation: Optional[str] = None
+    force_relation: Optional[Decimal] = Field(None, ge=0.0, le=1.0)
+
+
+class PrerequisCompetenceCreate(PrerequisCompetenceBase):
+    """Schéma pour créer un prérequis."""
+    pass
+
+
+class PrerequisCompetenceUpdate(BaseModel):
+    """Schéma pour mettre à jour un prérequis."""
+    type_relation: Optional[str] = None
+    force_relation: Optional[Decimal] = Field(None, ge=0.0, le=1.0)
+
+
+class PrerequisCompetenceResponse(PrerequisCompetenceBase):
+    """Schéma de réponse pour un prérequis."""
+    id: int
+
+    class Config:
+        from_attributes = True
+
+
+# Schéma enrichi avec noms des compétences
+class PrerequisCompetenceWithNames(PrerequisCompetenceResponse):
+    """Schéma enrichi avec les noms des compétences."""
+    competence_code: Optional[str] = None
+    competence_nom: Optional[str] = None
+    prerequis_code: Optional[str] = None
+    prerequis_nom: Optional[str] = None
+    
+    class Config:
+        from_attributes = True
+
+### FILE: ./medicament.py
+
+"""Schémas Pydantic pour les médicaments."""
+from pydantic import BaseModel
+from typing import Optional, Dict, Any
+from datetime import datetime
+
+
+class MedicamentBase(BaseModel):
+    """Schéma de base pour un médicament."""
+    nom_commercial: Optional[str] = None
+    dci: str
+    classe_therapeutique: Optional[str] = None
+    forme_galenique: Optional[str] = None
+    dosage: Optional[str] = None
+    voie_administration: Optional[str] = None
+
+
+class MedicamentCreate(MedicamentBase):
+    """Schéma pour créer un médicament."""
+    pass
+
+
+class MedicamentUpdate(BaseModel):
+    """Schéma pour mettre à jour un médicament."""
+    nom_commercial: Optional[str] = None
+    classe_therapeutique: Optional[str] = None
+    forme_galenique: Optional[str] = None
+    dosage: Optional[str] = None
+    disponibilite_cameroun: Optional[str] = None
+    cout_moyen_fcfa: Optional[int] = None
+
+
+class MedicamentResponse(MedicamentBase):
+    """Schéma de réponse pour un médicament."""
+    id: int
+    mecanisme_action: Optional[str] = None
+    indications: Optional[Dict[str, Any]] = None
+    contre_indications: Optional[Dict[str, Any]] = None
+    effets_secondaires: Optional[Dict[str, Any]] = None
+    interactions_medicamenteuses: Optional[Dict[str, Any]] = None
+    precautions_emploi: Optional[str] = None
+    posologie_standard: Optional[Dict[str, Any]] = None
+    disponibilite_cameroun: Optional[str] = None
+    cout_moyen_fcfa: Optional[int] = None
+    statut_prescription: Optional[str] = None
+    created_at: datetime
+    updated_at: datetime
+
+    class Config:
+        from_attributes = True
+
+
+# Schéma simplifié
+class MedicamentListResponse(BaseModel):
+    """Schéma simplifié pour liste."""
+    id: int
+    nom_commercial: Optional[str] = None
+    dci: str
+    classe_therapeutique: Optional[str] = None
+    disponibilite_cameroun: Optional[str] = None
+    cout_moyen_fcfa: Optional[int] = None
+    
+    class Config:
+        from_attributes = True
+
+### FILE: ./concept.py
+
+"""Wrapper de compatibilité."""
+from app.schemas.competence_clinique import (
+    CompetenceCliniqueBase,
+    CompetenceCliniqueCreate,
+    CompetenceCliniqueUpdate,
+    CompetenceCliniqueResponse,
+    CompetenceCliniqueWithPrerequisResponse
+)
+
+# Aliases pour compatibilité
+ConceptBase = CompetenceCliniqueBase
+ConceptCreate = CompetenceCliniqueCreate
+ConceptUpdate = CompetenceCliniqueUpdate
+ConceptResponse = CompetenceCliniqueResponse
+
+### FILE: ./simulation_session.py
+
+"""Schémas Pydantic pour les sessions de simulation."""
+from pydantic import BaseModel, Field
+from typing import Optional, Dict, Any
+from datetime import datetime
+from uuid import UUID
+
+
+class SimulationSessionBase(BaseModel):
+    """Schéma de base pour une session de simulation."""
+    learner_id: int
+    cas_clinique_id: int
+    statut: Optional[str] = "en_cours"
+    current_stage: Optional[str] = None
+
+
+class SimulationSessionCreate(SimulationSessionBase):
+    """Schéma pour créer une session de simulation."""
+    pass
+
+
+class SimulationSessionUpdate(BaseModel):
+    """Schéma pour mettre à jour une session."""
+    score_final: Optional[float] = Field(None, ge=0.0, le=100.0)
+    temps_total: Optional[int] = Field(None, ge=0)
+    cout_virtuel_genere: Optional[int] = None
+    statut: Optional[str] = None
+    raison_fin: Optional[str] = None
+    current_stage: Optional[str] = None
+    context_state: Optional[Dict[str, Any]] = None
+
+
+class SimulationSessionComplete(BaseModel):
+    """Schéma pour terminer une session."""
+    score_final: float = Field(ge=0.0, le=100.0)
+    raison_fin: str
+    context_state: Optional[Dict[str, Any]] = None
+
+
+class SimulationSessionResponse(SimulationSessionBase):
+    """Schéma de réponse pour une session."""
+    id: UUID
+    start_time: datetime
+    end_time: Optional[datetime] = None
+    score_final: Optional[float] = None
+    temps_total: Optional[int] = None
+    cout_virtuel_genere: Optional[int] = None
+    raison_fin: Optional[str] = None
+    context_state: Optional[Dict[str, Any]] = None
+
+    class Config:
+        from_attributes = True
+
+
+# Schéma enrichi avec détails
+class SimulationSessionWithDetails(SimulationSessionResponse):
+    """Schéma enrichi avec les détails du cas et de l'apprenant."""
+    learner_nom: Optional[str] = None
+    learner_matricule: Optional[str] = None
+    cas_code_fultang: Optional[str] = None
+    cas_niveau_difficulte: Optional[int] = None
+    nb_interactions: Optional[int] = None
+    
+    class Config:
+        from_attributes = True
+
+### FILE: ./learner.py
+
+"""Schémas Pydantic pour les apprenants."""
+from pydantic import BaseModel, EmailStr
+from datetime import datetime
+from typing import Optional
+
+
+class LearnerBase(BaseModel):
+    """Schéma de base pour un apprenant."""
+    matricule: Optional[str] = None
+    nom: str
+    email: EmailStr
+    niveau_etudes: Optional[str] = None
+    specialite_visee: Optional[str] = None
+    langue_preferee: Optional[str] = "fr"
+
+
+class LearnerCreate(LearnerBase):
+    """Schéma pour créer un apprenant."""
+    pass
+
+
+class LearnerUpdate(BaseModel):
+    """Schéma pour mettre à jour un apprenant."""
+    matricule: Optional[str] = None
+    nom: Optional[str] = None
+    niveau_etudes: Optional[str] = None
+    specialite_visee: Optional[str] = None
+    langue_preferee: Optional[str] = None
+
+
+class LearnerResponse(LearnerBase):
+    """Schéma de réponse pour un apprenant."""
+    id: int
+    date_inscription: datetime
+    
+    # Propriétés de compatibilité
+    @property
+    def first_name(self) -> str:
+        if self.nom:
+            return self.nom.split()[0]
+        return ""
+    
+    @property
+    def last_name(self) -> str:
+        if self.nom:
+            parts = self.nom.split()
+            return " ".join(parts[1:]) if len(parts) > 1 else ""
+        return ""
+    
+    @property
+    def level(self) -> Optional[str]:
+        return self.niveau_etudes
+    
+    @property
+    def field_of_study(self) -> Optional[str]:
+        return self.specialite_visee
+    
+    @property
+    def created_at(self) -> datetime:
+        return self.date_inscription
+    
+    class Config:
+        from_attributes = True
+
+### FILE: ./__init__.py
+
+"""Schémas Pydantic - Imports centralisés."""
+
+# Apprenant
+from app.schemas.learner import (
+    LearnerBase,
+    LearnerCreate,
+    LearnerUpdate,
+    LearnerResponse
+)
+
+# Profil apprenant
+from app.schemas.learner_behavior import (
+    LearnerBehaviorBase,
+    LearnerBehaviorCreate,
+    LearnerBehaviorUpdate,
+    LearnerBehaviorResponse
+)
+
+from app.schemas.learner_cognitive import (
+    LearnerCognitiveBase,
+    LearnerCognitiveCreate,
+    LearnerCognitiveUpdate,
+    LearnerCognitiveResponse
+)
+
+from app.schemas.learner_affective import (
+    LearnerAffectiveBase,
+    LearnerAffectiveCreate,
+    LearnerAffectiveUpdate,
+    LearnerAffectiveResponse
+)
+
+# Compétences
+from app.schemas.competence_clinique import (
+    CompetenceCliniqueBase,
+    CompetenceCliniqueCreate,
+    CompetenceCliniqueUpdate,
+    CompetenceCliniqueResponse,
+    CompetenceCliniqueWithPrerequisResponse
+)
+
+from app.schemas.prerequis_competence import (
+    PrerequisCompetenceBase,
+    PrerequisCompetenceCreate,
+    PrerequisCompetenceUpdate,
+    PrerequisCompetenceResponse,
+    PrerequisCompetenceWithNames
+)
+
+from app.schemas.learner_competency import (
+    LearnerCompetencyMasteryBase,
+    LearnerCompetencyMasteryCreate,
+    LearnerCompetencyMasteryUpdate,
+    LearnerCompetencyMasteryResponse,
+    LearnerCompetencyMasteryWithCompetence
+)
+
+# Sessions et interactions
+from app.schemas.simulation_session import (
+    SimulationSessionBase,
+    SimulationSessionCreate,
+    SimulationSessionUpdate,
+    SimulationSessionComplete,
+    SimulationSessionResponse,
+    SimulationSessionWithDetails
+)
+
+from app.schemas.interaction_log import (
+    InteractionLogBase,
+    InteractionLogCreate,
+    InteractionLogUpdate,
+    InteractionLogResponse,
+    InteractionLogWithContext,
+    InteractionLogBatchCreate
+)
+
+# Contenu médical
+from app.schemas.cas_clinique import (
+    CasCliniqueBase,
+    CasCliniqueCreate,
+    CasCliniqueUpdate,
+    CasCliniqueResponse,
+    CasCliniqueListResponse
+)
+
+from app.schemas.pathologie import (
+    PathologieBase,
+    PathologieCreate,
+    PathologieUpdate,
+    PathologieResponse,
+    PathologieListResponse
+)
+
+from app.schemas.symptome import (
+    SymptomeBase,
+    SymptomeCreate,
+    SymptomeUpdate,
+    SymptomeResponse
+)
+
+from app.schemas.medicament import (
+    MedicamentBase,
+    MedicamentCreate,
+    MedicamentUpdate,
+    MedicamentResponse,
+    MedicamentListResponse
+)
+
+# Wrappers compatibilité
+from app.schemas.learner_knowledge import (
+    LearnerKnowledgeBase,
+    LearnerKnowledgeCreate,
+    LearnerKnowledgeUpdate,
+    LearnerKnowledgeResponse
+)
+
+from app.schemas.concept import (
+    ConceptBase,
+    ConceptCreate,
+    ConceptUpdate,
+    ConceptResponse
+)
+
+__all__ = [
+    # Apprenant
+    "LearnerBase",
+    "LearnerCreate",
+    "LearnerUpdate",
+    "LearnerResponse",
+    
+    # Profil apprenant
+    "LearnerBehaviorBase",
+    "LearnerBehaviorCreate",
+    "LearnerBehaviorUpdate",
+    "LearnerBehaviorResponse",
+    "LearnerCognitiveBase",
+    "LearnerCognitiveCreate",
+    "LearnerCognitiveUpdate",
+    "LearnerCognitiveResponse",
+    "LearnerAffectiveBase",
+    "LearnerAffectiveCreate",
+    "LearnerAffectiveUpdate",
+    "LearnerAffectiveResponse",
+    
+    # Compétences
+    "CompetenceCliniqueBase",
+    "CompetenceCliniqueCreate",
+    "CompetenceCliniqueUpdate",
+    "CompetenceCliniqueResponse",
+    "CompetenceCliniqueWithPrerequisResponse",
+    "PrerequisCompetenceBase",
+    "PrerequisCompetenceCreate",
+    "PrerequisCompetenceUpdate",
+    "PrerequisCompetenceResponse",
+    "PrerequisCompetenceWithNames",
+    "LearnerCompetencyMasteryBase",
+    "LearnerCompetencyMasteryCreate",
+    "LearnerCompetencyMasteryUpdate",
+    "LearnerCompetencyMasteryResponse",
+    "LearnerCompetencyMasteryWithCompetence",
+    
+    # Sessions et interactions
+    "SimulationSessionBase",
+    "SimulationSessionCreate",
+    "SimulationSessionUpdate",
+    "SimulationSessionComplete",
+    "SimulationSessionResponse",
+    "SimulationSessionWithDetails",
+    "InteractionLogBase",
+    "InteractionLogCreate",
+    "InteractionLogUpdate",
+    "InteractionLogResponse",
+    "InteractionLogWithContext",
+    "InteractionLogBatchCreate",
+    
+    # Contenu médical
+    "CasCliniqueBase",
+    "CasCliniqueCreate",
+    "CasCliniqueUpdate",
+    "CasCliniqueResponse",
+    "CasCliniqueListResponse",
+    "PathologieBase",
+    "PathologieCreate",
+    "PathologieUpdate",
+    "PathologieResponse",
+    "PathologieListResponse",
+    "SymptomeBase",
+    "SymptomeCreate",
+    "SymptomeUpdate",
+    "SymptomeResponse",
+    "MedicamentBase",
+    "MedicamentCreate",
+    "MedicamentUpdate",
+    "MedicamentResponse",
+    "MedicamentListResponse",
+    
+    # Compatibilité
+    "LearnerKnowledgeBase",
+    "LearnerKnowledgeCreate",
+    "LearnerKnowledgeUpdate",
+    "LearnerKnowledgeResponse",
+    "ConceptBase",
+    "ConceptCreate",
+    "ConceptUpdate",
+    "ConceptResponse",
+]
+
+### FILE: ./learner_knowledge.py
+
+"""Wrapper de compatibilité."""
+from app.schemas.learner_competency import (
+    LearnerCompetencyMasteryBase,
+    LearnerCompetencyMasteryCreate,
+    LearnerCompetencyMasteryUpdate,
+    LearnerCompetencyMasteryResponse,
+    LearnerCompetencyMasteryWithCompetence
+)
+
+# Aliases pour compatibilité
+LearnerKnowledgeBase = LearnerCompetencyMasteryBase
+LearnerKnowledgeCreate = LearnerCompetencyMasteryCreate
+LearnerKnowledgeUpdate = LearnerCompetencyMasteryUpdate
+LearnerKnowledgeResponse = LearnerCompetencyMasteryResponse
+
+### FILE: ./learner_behavior.py
+
+"""Schémas Pydantic pour le comportement de l'apprenant."""
+from pydantic import BaseModel, Field
+from datetime import datetime
+from typing import Optional
+
+
+class LearnerBehaviorBase(BaseModel):
+    """Schéma de base pour le comportement."""
+    learner_id: int
+    sessions_count: Optional[int] = Field(default=0, ge=0)
+    activities_count: Optional[int] = Field(default=0, ge=0)
+    total_time_spent: Optional[int] = Field(default=0, ge=0)
+
+
+class LearnerBehaviorCreate(LearnerBehaviorBase):
+    """Schéma pour créer un enregistrement de comportement."""
+    pass
+
+
+class LearnerBehaviorUpdate(BaseModel):
+    """Schéma pour mettre à jour le comportement."""
+    sessions_count: Optional[int] = Field(None, ge=0)
+    activities_count: Optional[int] = Field(None, ge=0)
+    total_time_spent: Optional[int] = Field(None, ge=0)
+
+
+class LearnerBehaviorResponse(LearnerBehaviorBase):
+    """Schéma de réponse pour le comportement."""
+    id: int
+    engagement_score: Optional[float] = None
+    created_at: datetime
+    updated_at: Optional[datetime] = None
+
+    class Config:
+        from_attributes = True
+
+### FILE: ./symptome.py
+
+"""Schémas Pydantic pour les symptômes."""
+from pydantic import BaseModel
+from typing import Optional, Dict, Any
+from datetime import datetime
+
+
+class SymptomeBase(BaseModel):
+    """Schéma de base pour un symptôme."""
+    nom: str
+    nom_local: Optional[str] = None
+    categorie: Optional[str] = None
+    type_symptome: Optional[str] = None
+    description: Optional[str] = None
+    questions_anamnese: Optional[Dict[str, Any]] = None
+    signes_alarme: bool = False
+
+
+class SymptomeCreate(SymptomeBase):
+    """Schéma pour créer un symptôme."""
+    pass
+
+
+class SymptomeUpdate(BaseModel):
+    """Schéma pour mettre à jour un symptôme."""
+    nom_local: Optional[str] = None
+    categorie: Optional[str] = None
+    description: Optional[str] = None
+    questions_anamnese: Optional[Dict[str, Any]] = None
+    signes_alarme: Optional[bool] = None
+
+
+class SymptomeResponse(SymptomeBase):
+    """Schéma de réponse pour un symptôme."""
+    id: int
+    created_at: datetime
+    updated_at: datetime
+
+    class Config:
+        from_attributes = True
+
+### FILE: ./learner_cognitive.py
+
+"""Schémas Pydantic pour le profil cognitif de l'apprenant."""
+from pydantic import BaseModel, Field
+from typing import Optional
+
+
+class LearnerCognitiveBase(BaseModel):
+    """Schéma de base pour le profil cognitif."""
+    learner_id: int
+    vitesse_assimilation: Optional[float] = Field(None, ge=0.0, le=1.0)
+    capacite_memoire_travail: Optional[float] = Field(None, ge=0.0, le=1.0)
+    tendance_impulsivite: Optional[float] = Field(None, ge=0.0, le=1.0)
+    prefer_visual: Optional[bool] = None
+
+
+class LearnerCognitiveCreate(LearnerCognitiveBase):
+    """Schéma pour créer un profil cognitif."""
+    pass
+
+
+class LearnerCognitiveUpdate(BaseModel):
+    """Schéma pour mettre à jour un profil cognitif."""
+    vitesse_assimilation: Optional[float] = Field(None, ge=0.0, le=1.0)
+    capacite_memoire_travail: Optional[float] = Field(None, ge=0.0, le=1.0)
+    tendance_impulsivite: Optional[float] = Field(None, ge=0.0, le=1.0)
+    prefer_visual: Optional[bool] = None
+
+
+class LearnerCognitiveResponse(LearnerCognitiveBase):
+    """Schéma de réponse pour le profil cognitif."""
+    id: int
+    
+    # Propriétés de compatibilité
+    @property
+    def learning_style(self) -> Optional[str]:
+        if self.prefer_visual is True:
+            return "visuel"
+        elif self.prefer_visual is False:
+            return "auditif"
+        return None
+    
+    @property
+    def learning_speed(self) -> Optional[float]:
+        return self.vitesse_assimilation
+    
+    @property
+    def autonomy_level(self) -> Optional[float]:
+        if self.tendance_impulsivite is not None:
+            return 1.0 - self.tendance_impulsivite
+        return None
+
+    class Config:
+        from_attributes = True
+
+### FILE: ./pathologie.py
+
+"""Schémas Pydantic pour les pathologies."""
+from pydantic import BaseModel
+from typing import Optional, Dict, Any
+from datetime import datetime
+from decimal import Decimal
+
+
+class PathologieBase(BaseModel):
+    """Schéma de base pour une pathologie."""
+    code_icd10: Optional[str] = None
+    nom_fr: str
+    nom_en: Optional[str] = None
+    nom_local: Optional[str] = None
+    categorie: Optional[str] = None
+    prevalence_cameroun: Optional[Decimal] = None
+    niveau_gravite: Optional[int] = None
+    description: Optional[str] = None
+
+
+class PathologieCreate(PathologieBase):
+    """Schéma pour créer une pathologie."""
+    pass
+
+
+class PathologieUpdate(BaseModel):
+    """Schéma pour mettre à jour une pathologie."""
+    nom_fr: Optional[str] = None
+    nom_en: Optional[str] = None
+    categorie: Optional[str] = None
+    description: Optional[str] = None
+    physiopathologie: Optional[str] = None
+
+
+class PathologieResponse(PathologieBase):
+    """Schéma de réponse pour une pathologie."""
+    id: int
+    physiopathologie: Optional[str] = None
+    evolution_naturelle: Optional[str] = None
+    complications: Optional[Dict[str, Any]] = None
+    facteurs_risque: Optional[Dict[str, Any]] = None
+    prevention: Optional[str] = None
+    created_at: datetime
+    updated_at: datetime
+
+    class Config:
+        from_attributes = True
+
+
+# Schéma simplifié
+class PathologieListResponse(BaseModel):
+    """Schéma simplifié pour liste."""
+    id: int
+    code_icd10: Optional[str] = None
+    nom_fr: str
+    categorie: Optional[str] = None
+    niveau_gravite: Optional[int] = None
+    
+    class Config:
+        from_attributes = True
+
+### FILE: ./learner_performance.py
+
+"""Schémas Pydantic pour les performances de l'apprenant."""
+from pydantic import BaseModel, Field
+from typing import Optional
+from datetime import datetime
+
+
+class LearnerPerformanceBase(BaseModel):
+    """Schéma de base pour les performances."""
+    learner_id: int
+    concept_id: int
+    activity_type: str
+    score: float = Field(ge=0.0, le=100.0)
+    time_spent: Optional[int] = None
+    attempts: int = Field(default=1, ge=1)
+
+
+class LearnerPerformanceCreate(LearnerPerformanceBase):
+    """Schéma pour créer un enregistrement de performance."""
+    pass
+
+
+class LearnerPerformanceResponse(LearnerPerformanceBase):
+    """Schéma de réponse pour les performances."""
+    id: int
+    created_at: datetime
+
+    class Config:
+        from_attributes = True
+
+
+### FILE: ./interaction_log.py
+
+"""Schémas Pydantic pour les logs d'interaction."""
+from pydantic import BaseModel, Field
+from typing import Optional, Dict, Any
+from datetime import datetime
+from uuid import UUID
+
+
+class InteractionLogBase(BaseModel):
+    """Schéma de base pour un log d'interaction."""
+    session_id: UUID
+    action_category: Optional[str] = None
+    action_type: str
+    action_content: Optional[Dict[str, Any]] = None
+    response_latency: Optional[int] = Field(None, ge=0)
+    charge_cognitive_estimee: Optional[float] = Field(None, ge=0.0, le=1.0)
+    est_pertinent: Optional[bool] = None
+
+
+class InteractionLogCreate(InteractionLogBase):
+    """Schéma pour créer un log d'interaction."""
+    pass
+
+
+class InteractionLogUpdate(BaseModel):
+    """Schéma pour mettre à jour un log."""
+    charge_cognitive_estimee: Optional[float] = Field(None, ge=0.0, le=1.0)
+    est_pertinent: Optional[bool] = None
+
+
+class InteractionLogResponse(InteractionLogBase):
+    """Schéma de réponse pour un log d'interaction."""
+    id: int
+    timestamp: datetime
+
+    class Config:
+        from_attributes = True
+
+
+# Schéma enrichi avec contexte
+class InteractionLogWithContext(InteractionLogResponse):
+    """Schéma enrichi avec contexte de session."""
+    learner_id: Optional[int] = None
+    cas_clinique_id: Optional[int] = None
+    session_statut: Optional[str] = None
+    
+    class Config:
+        from_attributes = True
+
+
+# Schéma pour batch creation
+class InteractionLogBatchCreate(BaseModel):
+    """Schéma pour créer plusieurs logs en batch."""
+    session_id: UUID
+    actions: list[Dict[str, Any]]
+
+### FILE: ./learning_history.py
+
+"""Schémas Pydantic pour l'historique d'apprentissage."""
+from pydantic import BaseModel
+from typing import Optional
+from datetime import datetime
+
+
+class LearningHistoryBase(BaseModel):
+    """Schéma de base pour l'historique d'apprentissage."""
+    learner_id: int
+    activity_type: str
+    activity_ref: Optional[str] = None
+    success: Optional[bool] = None
+    score: Optional[int] = None
+    time_spent: Optional[int] = None
+
+
+class LearningHistoryCreate(LearningHistoryBase):
+    """Schéma pour créer un enregistrement d'historique."""
+    pass
+
+
+class LearningHistoryResponse(LearningHistoryBase):
+    """Schéma de réponse pour l'historique d'apprentissage."""
+    id: int
+    created_at: datetime
+
+    class Config:
+        from_attributes = True

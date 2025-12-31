@@ -1,10 +1,10 @@
 """Routes FastAPI pour le modèle de connaissances de l'apprenant."""
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
-from app.models.learner_knowledge import LearnerKnowledge
+from Backend.app.models.learner_competency_mastery import LearnerKnowledge
 from app.models.learner import Learner
 from app.models.concept import Concept
-from app.schemas.learner_knowledge import (
+from Backend.app.schemas.learner_competency import (
     LearnerKnowledgeCreate,
     LearnerKnowledgeResponse
 )

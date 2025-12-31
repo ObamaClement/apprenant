@@ -1,9 +1,9 @@
-"""Service d'analyse des performances de l'apprenant."""
-from typing import List
+"""Service d'analyse des performances basé sur SimulationSession."""
+from typing import List, Dict, Any
 from sqlalchemy.orm import Session
 from sqlalchemy import func
-from app.models.learner_performance import LearnerPerformance
-from app.models.concept import Concept
+from app.models.simulation_session import SimulationSession
+from app.models.cas_clinique import CasCliniqueEnrichi
 
 
 def compute_progress(scores: List[float]) -> float:
@@ -71,13 +71,12 @@ def compute_trend(scores: List[float]) -> str:
         return "stable"
 
 
-def performance_indicator(score: float, time_spent: int = None) -> str:
+def performance_indicator(score: float) -> str:
     """
     Indicateur qualitatif de performance.
     
     Args:
         score: Score obtenu (0-100)
-        time_spent: Temps passé en secondes (optionnel)
     
     Returns:
         Label: "excellent", "bon", "moyen", ou "faible"
@@ -94,160 +93,246 @@ def performance_indicator(score: float, time_spent: int = None) -> str:
 
 def get_learner_performance_stats(
     db: Session,
-    learner_id: int,
-    concept_id: int = None
-) -> dict:
+    learner_id: int
+) -> Dict[str, Any]:
     """
     Obtenir les statistiques de performance d'un apprenant.
     
     Args:
         db: Session de base de données
         learner_id: ID de l'apprenant
-        concept_id: ID du concept (optionnel, pour filtrer)
     
     Returns:
         Dictionnaire avec statistiques
     """
-    query = db.query(LearnerPerformance).filter(
-        LearnerPerformance.learner_id == learner_id
-    )
+    # Récupérer toutes les sessions terminées
+    sessions = db.query(SimulationSession).filter(
+        SimulationSession.learner_id == learner_id,
+        SimulationSession.statut == "termine"
+    ).order_by(SimulationSession.start_time).all()
     
-    if concept_id:
-        query = query.filter(LearnerPerformance.concept_id == concept_id)
-    
-    performances = query.order_by(LearnerPerformance.created_at).all()
-    
-    if not performances:
+    if not sessions:
         return {
             "learner_id": learner_id,
-            "concept_id": concept_id,
-            "total_activities": 0,
+            "total_sessions": 0,
             "average_score": 0.0,
             "best_score": 0.0,
             "worst_score": 0.0,
             "trend": "stable",
             "total_time_spent": 0,
-            "activities": []
+            "sessions": []
         }
     
-    scores = [p.score for p in performances]
-    times = [p.time_spent for p in performances if p.time_spent]
+    scores = [s.score_final for s in sessions if s.score_final is not None]
+    times = [s.temps_total for s in sessions if s.temps_total]
     
     return {
         "learner_id": learner_id,
-        "concept_id": concept_id,
-        "total_activities": len(performances),
+        "total_sessions": len(sessions),
+        "completed_sessions": len(sessions),
         "average_score": round(compute_average_score(scores), 2),
-        "best_score": max(scores),
-        "worst_score": min(scores),
+        "best_score": max(scores) if scores else 0.0,
+        "worst_score": min(scores) if scores else 0.0,
         "progress": round(compute_progress(scores), 2),
         "trend": compute_trend(scores),
         "total_time_spent": sum(times) if times else 0,
-        "average_time_per_activity": round(sum(times) / len(times), 2) if times else 0,
-        "activities": [
+        "average_time_per_session": round(sum(times) / len(times), 2) if times else 0,
+        "sessions": [
             {
-                "id": p.id,
-                "activity_type": p.activity_type,
-                "score": p.score,
-                "indicator": performance_indicator(p.score, p.time_spent),
-                "time_spent": p.time_spent,
-                "attempts": p.attempts,
-                "created_at": p.created_at.isoformat()
+                "id": str(s.id),
+                "cas_clinique_id": s.cas_clinique_id,
+                "score": s.score_final,
+                "indicator": performance_indicator(s.score_final) if s.score_final else "N/A",
+                "temps_total": s.temps_total,
+                "start_time": s.start_time.isoformat() if s.start_time else None,
+                "raison_fin": s.raison_fin
             }
-            for p in performances
+            for s in sessions
         ]
     }
 
 
-def get_concept_performance_summary(
+def get_performance_by_difficulty(
     db: Session,
     learner_id: int
-) -> dict:
+) -> Dict[int, Dict[str, Any]]:
     """
-    Obtenir un résumé des performances par concept.
+    Obtenir les performances par niveau de difficulté.
     
     Args:
         db: Session de base de données
         learner_id: ID de l'apprenant
     
     Returns:
-        Dictionnaire avec performances par concept
+        Dictionnaire {niveau_difficulte: statistiques}
     """
-    performances = db.query(LearnerPerformance).filter(
-        LearnerPerformance.learner_id == learner_id
+    sessions = db.query(SimulationSession).filter(
+        SimulationSession.learner_id == learner_id,
+        SimulationSession.statut == "termine"
     ).all()
     
-    if not performances:
-        return {
-            "learner_id": learner_id,
-            "total_concepts": 0,
-            "overall_average": 0.0,
-            "concepts": []
+    # Grouper par niveau de difficulté
+    by_difficulty = {}
+    
+    for session in sessions:
+        case = db.query(CasCliniqueEnrichi).filter(
+            CasCliniqueEnrichi.id == session.cas_clinique_id
+        ).first()
+        
+        if not case or not case.niveau_difficulte:
+            continue
+        
+        level = case.niveau_difficulte
+        
+        if level not in by_difficulty:
+            by_difficulty[level] = {
+                "sessions": [],
+                "scores": []
+            }
+        
+        by_difficulty[level]["sessions"].append(session)
+        if session.score_final is not None:
+            by_difficulty[level]["scores"].append(session.score_final)
+    
+    # Calculer les statistiques par niveau
+    stats = {}
+    for level, data in by_difficulty.items():
+        scores = data["scores"]
+        stats[level] = {
+            "niveau_difficulte": level,
+            "nb_sessions": len(data["sessions"]),
+            "average_score": round(compute_average_score(scores), 2),
+            "best_score": max(scores) if scores else 0.0,
+            "success_rate": len([s for s in scores if s >= 60]) / len(scores) * 100 if scores else 0.0
         }
     
-    # Grouper par concept
-    concept_data = {}
-    for perf in performances:
-        if perf.concept_id not in concept_data:
-            concept_data[perf.concept_id] = {
-                "concept_id": perf.concept_id,
-                "concept_name": perf.concept.name if perf.concept else "Unknown",
-                "scores": [],
-                "activities": 0
-            }
-        concept_data[perf.concept_id]["scores"].append(perf.score)
-        concept_data[perf.concept_id]["activities"] += 1
-    
-    # Calculer les statistiques par concept
-    concepts_summary = []
-    all_scores = []
-    
-    for concept_id, data in concept_data.items():
-        avg_score = compute_average_score(data["scores"])
-        concepts_summary.append({
-            "concept_id": concept_id,
-            "concept_name": data["concept_name"],
-            "average_score": round(avg_score, 2),
-            "best_score": max(data["scores"]),
-            "worst_score": min(data["scores"]),
-            "activities": data["activities"],
-            "trend": compute_trend(data["scores"]),
-            "indicator": performance_indicator(avg_score)
-        })
-        all_scores.extend(data["scores"])
-    
-    # Trier par score moyen décroissant
-    concepts_summary.sort(key=lambda x: x["average_score"], reverse=True)
-    
-    return {
-        "learner_id": learner_id,
-        "total_concepts": len(concepts_summary),
-        "overall_average": round(compute_average_score(all_scores), 2),
-        "concepts": concepts_summary
-    }
+    return stats
 
 
-def identify_weak_concepts(
+def identify_weak_cases(
     db: Session,
     learner_id: int,
     threshold: float = 60.0
-) -> List[dict]:
+) -> List[Dict[str, Any]]:
     """
-    Identifier les concepts où l'apprenant a des difficultés.
+    Identifier les cas où l'apprenant a eu des difficultés.
     
     Args:
         db: Session de base de données
         learner_id: ID de l'apprenant
-        threshold: Seuil de score pour considérer comme faible (défaut: 60)
+        threshold: Seuil de score (défaut: 60)
     
     Returns:
-        Liste des concepts faibles
+        Liste des cas difficiles
     """
-    summary = get_concept_performance_summary(db, learner_id)
+    sessions = db.query(SimulationSession).filter(
+        SimulationSession.learner_id == learner_id,
+        SimulationSession.statut == "termine",
+        SimulationSession.score_final < threshold
+    ).all()
     
-    weak_concepts = [
-        c for c in summary["concepts"]
-        if c["average_score"] < threshold
-    ]
+    weak_cases = []
     
-    return weak_concepts
+    for session in sessions:
+        case = db.query(CasCliniqueEnrichi).filter(
+            CasCliniqueEnrichi.id == session.cas_clinique_id
+        ).first()
+        
+        if case:
+            weak_cases.append({
+                "session_id": str(session.id),
+                "cas_clinique_id": case.id,
+                "code_fultang": case.code_fultang,
+                "niveau_difficulte": case.niveau_difficulte,
+                "score": session.score_final,
+                "pathologie_id": case.pathologie_principale_id,
+                "date": session.start_time.isoformat() if session.start_time else None
+            })
+    
+    # Trier par score croissant
+    weak_cases.sort(key=lambda x: x["score"])
+    
+    return weak_cases
+
+
+def get_performance_summary(
+    db: Session,
+    learner_id: int
+) -> Dict[str, Any]:
+    """
+    Obtenir un résumé complet des performances.
+    
+    Args:
+        db: Session de base de données
+        learner_id: ID de l'apprenant
+    
+    Returns:
+        Résumé complet
+    """
+    general_stats = get_learner_performance_stats(db, learner_id)
+    by_difficulty = get_performance_by_difficulty(db, learner_id)
+    weak_cases = identify_weak_cases(db, learner_id)
+    
+    return {
+        "general": general_stats,
+        "by_difficulty": by_difficulty,
+        "weak_cases": weak_cases[:5],  # Top 5 des cas difficiles
+        "recommendations": _generate_recommendations(general_stats, by_difficulty, weak_cases)
+    }
+
+
+def _generate_recommendations(
+    general_stats: Dict,
+    by_difficulty: Dict,
+    weak_cases: List
+) -> List[str]:
+    """
+    Générer des recommandations basées sur les performances.
+    
+    Args:
+        general_stats: Statistiques générales
+        by_difficulty: Performances par difficulté
+        weak_cases: Cas difficiles
+    
+    Returns:
+        Liste de recommandations
+    """
+    recommendations = []
+    
+    avg_score = general_stats.get("average_score", 0)
+    trend = general_stats.get("trend", "stable")
+    
+    # Recommandations basées sur le score moyen
+    if avg_score < 50:
+        recommendations.append("Score moyen faible. Revoir les fondamentaux et commencer par des cas plus simples.")
+    elif avg_score < 70:
+        recommendations.append("Performances moyennes. Continuer à pratiquer sur des cas variés.")
+    else:
+        recommendations.append("Bonnes performances. Prêt pour des cas plus complexes.")
+    
+    # Recommandations basées sur la tendance
+    if trend == "declining":
+        recommendations.append("Tendance à la baisse détectée. Faire une pause ou revoir les concepts de base.")
+    elif trend == "improving":
+        recommendations.append("Progression positive ! Continuer sur cette lancée.")
+    
+    # Recommandations basées sur les niveaux de difficulté
+    if by_difficulty:
+        levels_with_issues = [
+            level for level, stats in by_difficulty.items()
+            if stats["average_score"] < 60
+        ]
+        if levels_with_issues:
+            recommendations.append(
+                f"Difficultés sur les niveaux {', '.join(map(str, levels_with_issues))}. "
+                "Concentrer les efforts sur ces niveaux."
+            )
+    
+    # Recommandations basées sur les cas faibles
+    if len(weak_cases) > 5:
+        recommendations.append(
+            f"Plusieurs cas difficiles identifiés ({len(weak_cases)}). "
+            "Reprendre les cas échoués pour renforcer la maîtrise."
+        )
+    
+    return recommendations

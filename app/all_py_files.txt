@@ -1,0 +1,3374 @@
+
+
+### FILE: ./main.py
+
+"""Point d'entrée FastAPI pour l'application STI."""
+from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
+from app.core.config import settings
+from app.core.database import Base, engine
+from app.models.learner import Learner
+from app.models.learning_history import LearningHistory
+from app.models.concept import Concept
+from app.models.learner_knowledge import LearnerKnowledge
+from app.models.learner_performance import LearnerPerformance
+from app.models.learner_behavior import LearnerBehavior
+from app.models.learner_cognitive import LearnerCognitiveProfile
+from app.models.learner_affective import LearnerAffectiveState
+from app.api.learners import router as learner_router
+from app.api.learning_history import router as history_router
+from app.api.concepts import router as concept_router
+from app.api.learner_knowledge import router as knowledge_router
+from app.api.learner_performance import router as performance_router
+from app.api.learner_behavior import router as behavior_router
+from app.api.learner_cognitive import router as cognitive_router
+from app.api.learner_affective import router as affective_router
+from app.api.adaptation import router as adaptation_router
+
+# Créer les tables
+Base.metadata.create_all(bind=engine)
+
+# Créer l'application FastAPI
+app = FastAPI(
+    title="Module apprenant sti",
+    version="1.0.0",
+    debug=True
+)
+
+# Ajouter les middlewares CORS
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+# Inclure les routes
+app.include_router(learner_router)
+app.include_router(history_router)
+app.include_router(concept_router)
+app.include_router(knowledge_router)
+app.include_router(performance_router)
+app.include_router(behavior_router)
+app.include_router(cognitive_router)
+app.include_router(affective_router)
+app.include_router(adaptation_router)
+
+
+
+if __name__ == "__main__":
+    import uvicorn
+    uvicorn.run(
+        "app.main:app",
+        host="0.0.0.0",
+        port=8000,
+        reload=settings.DEBUG
+    )
+
+
+### FILE: ./core/database.py
+
+from sqlalchemy import create_engine
+from sqlalchemy.orm import sessionmaker, declarative_base
+from app.core.config import settings
+
+engine = create_engine(settings.DATABASE_URL)
+
+SessionLocal = sessionmaker(
+    autocommit=False,
+    autoflush=False,
+    bind=engine
+)
+
+Base = declarative_base()
+
+
+### FILE: ./core/__init__.py
+
+
+
+### FILE: ./core/deps.py
+
+"""Dépendances pour les routes FastAPI."""
+from app.core.database import SessionLocal
+
+
+def get_db():
+    """Fournir une session de base de données."""
+    db = SessionLocal()
+    try:
+        yield db
+    finally:
+        db.close()
+
+
+### FILE: ./core/config.py
+
+
+from pydantic_settings import BaseSettings
+
+
+class Settings(BaseSettings):
+    # Application
+    APP_NAME: str = "Module apprenant STI"
+    APP_VERSION: str = "1.0.0"
+    API_V1_STR: str = "/api/v1"
+    DEBUG: bool = True
+    
+    # Database
+    DATABASE_URL: str = "postgresql://utilisateur_elsa:elsaelsa@localhost:5432/bdapprenant"
+    
+ 
+    class Config:
+        env_file = ".env"
+        extra = "ignore"  # Ignorer les variables supplémentaires du .env
+
+
+settings = Settings()
+
+"""
+Configuration de l'application STI Learner
+
+INSTRUCTIONS DE CONFIGURATION DE LA BASE DE DONNÉES
+====================================================
+
+1️⃣ CRÉER UN UTILISATEUR POSTGRESQL
+-----------------------------------
+
+Ouvrir un terminal et se connecter à PostgreSQL:
+    sudo -u postgres psql
+
+Créer un nouvel utilisateur:
+    CREATE USER sti_user WITH PASSWORD 'password';
+    CREATE USER apprenant_elsa WITH PASSWORD 'elsaelsa';
+
+Donner les permissions:
+    ALTER ROLE sti_user SET client_encoding TO 'utf8';
+    ALTER ROLE sti_user SET default_transaction_isolation TO 'read committed';
+    ALTER ROLE sti_user SET default_transaction_deferrable TO on;
+    ALTER ROLE sti_user SET default_transaction_level TO 'read committed';
+
+2️⃣ CRÉER LA BASE DE DONNÉES
+----------------------------
+
+Créer la base de données:
+    CREATE DATABASE sti_db OWNER sti_user;
+    CREATE DATABASE bdapprenant OWNER utilisateur_elsa;
+
+Donner les permissions:
+    GRANT ALL PRIVILEGES ON DATABASE sti_db TO sti_user;
+
+3️⃣ VÉRIFIER LA CONNEXION
+------------------------
+
+Se connecter à la base de données:
+    psql -U sti_user -d sti_db -h localhost
+
+Si demandé, entrer le mot de passe: password
+
+4️⃣ CONFIGURER LE FICHIER .env
+------------------------------
+
+Créer un fichier .env à la racine du projet:
+    DATABASE_URL=postgresql://sti_user:password@localhost:5432/sti_db
+    DEBUG=True
+    APP_NAME=Module apprenant STI
+    APP_VERSION=1.0.0
+
+5️⃣ DÉMARRER L'APPLICATION
+--------------------------
+
+Installer les dépendances:
+    pip install -r requirements.txt
+
+Lancer l'application:
+    python -m uvicorn app.main:app --reload
+
+L'API sera disponible sur: http://127.0.0.1:8000
+Documentation: http://127.0.0.1:8000/docs
+
+6️⃣ RÉINITIALISER LA BASE DE DONNÉES
+-----------------------------------
+
+Si vous voulez recommencer à zéro:
+
+    # Se connecter en tant que superuser
+    sudo -u postgres psql
+    
+    # Supprimer la base de données
+    DROP DATABASE IF EXISTS sti_db;
+    
+    # Supprimer l'utilisateur
+    DROP USER IF EXISTS sti_user;
+    
+    # Puis refaire les étapes 1 et 2
+
+
+"""
+
+
+### FILE: ./schemas/learner_affective.py
+
+"""Schémas Pydantic pour l'état affectif de l'apprenant."""
+from pydantic import BaseModel, Field
+from datetime import datetime
+
+
+class LearnerAffectiveBase(BaseModel):
+    """Schéma de base pour l'état affectif."""
+    learner_id: int
+    motivation: float = Field(default=0.5, ge=0.0, le=1.0)
+    frustration: float = Field(default=0.0, ge=0.0, le=1.0)
+    confidence: float = Field(default=0.5, ge=0.0, le=1.0)
+    stress: float = Field(default=0.0, ge=0.0, le=1.0)
+
+
+class LearnerAffectiveCreate(LearnerAffectiveBase):
+    """Schéma pour créer un état affectif."""
+    pass
+
+
+class LearnerAffectiveResponse(LearnerAffectiveBase):
+    """Schéma de réponse pour l'état affectif."""
+    id: int
+    created_at: datetime
+    updated_at: datetime
+
+    class Config:
+        from_attributes = True
+
+
+### FILE: ./schemas/concept.py
+
+"""Schémas Pydantic pour les concepts pédagogiques."""
+from pydantic import BaseModel, Field
+from typing import Optional
+
+
+class ConceptBase(BaseModel):
+    """Schéma de base pour un concept."""
+    name: str
+    description: Optional[str] = None
+
+    p_init: float = Field(default=0.2, ge=0.0, le=1.0)
+    p_transit: float = Field(default=0.15, ge=0.0, le=1.0)
+    p_guess: float = Field(default=0.2, ge=0.0, le=1.0)
+    p_slip: float = Field(default=0.1, ge=0.0, le=1.0)
+
+
+class ConceptCreate(ConceptBase):
+    """Schéma pour créer un concept."""
+    pass
+
+
+class ConceptResponse(ConceptBase):
+    """Schéma de réponse pour un concept."""
+    id: int
+
+    class Config:
+        from_attributes = True
+
+
+### FILE: ./schemas/learner.py
+
+"""Schémas Pydantic pour les apprenants."""
+from pydantic import BaseModel, EmailStr
+from datetime import datetime
+from typing import Optional
+
+
+class LearnerBase(BaseModel):
+    """Schéma de base pour un apprenant."""
+    first_name: str
+    last_name: str
+    email: EmailStr
+    level: Optional[str] = None
+    field_of_study: Optional[str] = None
+
+
+class LearnerCreate(LearnerBase):
+    """Schéma pour créer un apprenant."""
+    pass
+
+
+class LearnerUpdate(BaseModel):
+    """Schéma pour mettre à jour un apprenant."""
+    first_name: Optional[str] = None
+    last_name: Optional[str] = None
+    level: Optional[str] = None
+    field_of_study: Optional[str] = None
+
+
+class LearnerResponse(LearnerBase):
+    """Schéma de réponse pour un apprenant."""
+    id: int
+    created_at: datetime
+    
+    class Config:
+        from_attributes = True
+
+### FILE: ./schemas/__init__.py
+
+
+
+### FILE: ./schemas/learner_knowledge.py
+
+"""Schémas Pydantic pour le modèle de connaissances de l'apprenant."""
+from pydantic import BaseModel, Field
+
+
+class LearnerKnowledgeBase(BaseModel):
+    """Schéma de base pour le modèle de connaissances."""
+    learner_id: int
+    concept_id: int
+    mastery_level: float = Field(ge=0.0, le=1.0)
+
+
+class LearnerKnowledgeCreate(LearnerKnowledgeBase):
+    """Schéma pour créer un enregistrement de connaissances."""
+    pass
+
+
+class LearnerKnowledgeResponse(LearnerKnowledgeBase):
+    """Schéma de réponse pour le modèle de connaissances."""
+    id: int
+
+    class Config:
+        from_attributes = True
+
+
+### FILE: ./schemas/learner_behavior.py
+
+"""Schémas Pydantic pour le comportement de l'apprenant."""
+from pydantic import BaseModel, Field
+from datetime import datetime
+
+
+class LearnerBehaviorBase(BaseModel):
+    """Schéma de base pour le comportement."""
+    learner_id: int
+    sessions_count: int = Field(ge=0)
+    activities_count: int = Field(ge=0)
+    total_time_spent: int = Field(ge=0)
+
+
+class LearnerBehaviorCreate(LearnerBehaviorBase):
+    """Schéma pour créer un enregistrement de comportement."""
+    pass
+
+
+class LearnerBehaviorResponse(LearnerBehaviorBase):
+    """Schéma de réponse pour le comportement."""
+    id: int
+    engagement_score: float
+    created_at: datetime
+    updated_at: datetime
+
+    class Config:
+        from_attributes = True
+
+
+### FILE: ./schemas/learner_cognitive.py
+
+"""Schémas Pydantic pour le profil cognitif de l'apprenant."""
+from pydantic import BaseModel, Field
+from typing import Optional
+from datetime import datetime
+
+
+class LearnerCognitiveBase(BaseModel):
+    """Schéma de base pour le profil cognitif."""
+    learner_id: int
+    learning_style: Optional[str] = None
+    learning_speed: Optional[float] = Field(None, ge=0.0, le=1.0)
+    autonomy_level: Optional[float] = Field(None, ge=0.0, le=1.0)
+
+
+class LearnerCognitiveCreate(LearnerCognitiveBase):
+    """Schéma pour créer un profil cognitif."""
+    pass
+
+
+class LearnerCognitiveResponse(LearnerCognitiveBase):
+    """Schéma de réponse pour le profil cognitif."""
+    id: int
+    created_at: datetime
+    updated_at: datetime
+
+    class Config:
+        from_attributes = True
+
+
+### FILE: ./schemas/learner_performance.py
+
+"""Schémas Pydantic pour les performances de l'apprenant."""
+from pydantic import BaseModel, Field
+from typing import Optional
+from datetime import datetime
+
+
+class LearnerPerformanceBase(BaseModel):
+    """Schéma de base pour les performances."""
+    learner_id: int
+    concept_id: int
+    activity_type: str
+    score: float = Field(ge=0.0, le=100.0)
+    time_spent: Optional[int] = None
+    attempts: int = Field(default=1, ge=1)
+
+
+class LearnerPerformanceCreate(LearnerPerformanceBase):
+    """Schéma pour créer un enregistrement de performance."""
+    pass
+
+
+class LearnerPerformanceResponse(LearnerPerformanceBase):
+    """Schéma de réponse pour les performances."""
+    id: int
+    created_at: datetime
+
+    class Config:
+        from_attributes = True
+
+
+### FILE: ./schemas/learning_history.py
+
+"""Schémas Pydantic pour l'historique d'apprentissage."""
+from pydantic import BaseModel
+from typing import Optional
+from datetime import datetime
+
+
+class LearningHistoryBase(BaseModel):
+    """Schéma de base pour l'historique d'apprentissage."""
+    learner_id: int
+    activity_type: str
+    activity_ref: Optional[str] = None
+    success: Optional[bool] = None
+    score: Optional[int] = None
+    time_spent: Optional[int] = None
+
+
+class LearningHistoryCreate(LearningHistoryBase):
+    """Schéma pour créer un enregistrement d'historique."""
+    pass
+
+
+class LearningHistoryResponse(LearningHistoryBase):
+    """Schéma de réponse pour l'historique d'apprentissage."""
+    id: int
+    created_at: datetime
+
+    class Config:
+        from_attributes = True
+
+
+### FILE: ./api/learner_affective.py
+
+"""Routes FastAPI pour l'état affectif de l'apprenant."""
+from fastapi import APIRouter, Depends, HTTPException
+from sqlalchemy.orm import Session
+from app.models.learner_affective import LearnerAffectiveState
+from app.models.learner import Learner
+from app.schemas.learner_affective import (
+    LearnerAffectiveCreate,
+    LearnerAffectiveResponse
+)
+from app.core.deps import get_db
+from app.services.affective_service import (
+    update_affective_state,
+    get_affective_profile,
+    get_feedback_type
+)
+
+router = APIRouter(prefix="/affective", tags=["Learner Affective"])
+
+
+@router.post("/", response_model=LearnerAffectiveResponse)
+def create_or_update_affective(
+    data: LearnerAffectiveCreate,
+    db: Session = Depends(get_db)
+):
+    """Créer ou mettre à jour l'état affectif d'un apprenant."""
+    learner = db.query(Learner).get(data.learner_id)
+    if not learner:
+        raise HTTPException(status_code=404, detail="Apprenant non trouvé")
+    
+    # Vérifier si un enregistrement existe déjà
+    existing = db.query(LearnerAffectiveState).filter(
+        LearnerAffectiveState.learner_id == data.learner_id
+    ).first()
+    
+    if existing:
+        # Mettre à jour
+        existing.motivation = data.motivation
+        existing.frustration = data.frustration
+        existing.confidence = data.confidence
+        existing.stress = data.stress
+        db.commit()
+        db.refresh(existing)
+        return existing
+    else:
+        # Créer
+        affective = LearnerAffectiveState(**data.dict())
+        db.add(affective)
+        db.commit()
+        db.refresh(affective)
+        return affective
+
+
+@router.get("/{learner_id}", response_model=LearnerAffectiveResponse)
+def get_affective_state(
+    learner_id: int,
+    db: Session = Depends(get_db)
+):
+    """Récupérer l'état affectif d'un apprenant."""
+    learner = db.query(Learner).get(learner_id)
+    if not learner:
+        raise HTTPException(status_code=404, detail="Apprenant non trouvé")
+    
+    affective = db.query(LearnerAffectiveState).filter(
+        LearnerAffectiveState.learner_id == learner_id
+    ).first()
+    
+    if not affective:
+        raise HTTPException(status_code=404, detail="État affectif non trouvé")
+    
+    return affective
+
+
+@router.post("/update-from-score/{learner_id}/{score}")
+def update_from_score(
+    learner_id: int,
+    score: float,
+    db: Session = Depends(get_db)
+):
+    """Mettre à jour l'état affectif basé sur un score de performance."""
+    learner = db.query(Learner).get(learner_id)
+    if not learner:
+        raise HTTPException(status_code=404, detail="Apprenant non trouvé")
+    
+    if not 0 <= score <= 100:
+        raise HTTPException(status_code=400, detail="Le score doit être entre 0 et 100")
+    
+    affective = db.query(LearnerAffectiveState).filter(
+        LearnerAffectiveState.learner_id == learner_id
+    ).first()
+    
+    if not affective:
+        # Créer un nouvel enregistrement avec état initial
+        affective = LearnerAffectiveState(learner_id=learner_id)
+        db.add(affective)
+        db.commit()
+        db.refresh(affective)
+    
+    # Mettre à jour l'état affectif
+    motivation, frustration, confidence, stress = update_affective_state(
+        affective.motivation,
+        affective.frustration,
+        affective.confidence,
+        affective.stress,
+        score
+    )
+    
+    affective.motivation = motivation
+    affective.frustration = frustration
+    affective.confidence = confidence
+    affective.stress = stress
+    
+    db.commit()
+    db.refresh(affective)
+    
+    return {
+        "learner_id": learner_id,
+        "score": score,
+        "motivation": motivation,
+        "frustration": frustration,
+        "confidence": confidence,
+        "stress": stress,
+        "message": "État affectif mis à jour"
+    }
+
+
+@router.get("/profile/{learner_id}")
+def get_affective_profile_endpoint(
+    learner_id: int,
+    db: Session = Depends(get_db)
+):
+    """Obtenir un profil affectif détaillé."""
+    learner = db.query(Learner).get(learner_id)
+    if not learner:
+        raise HTTPException(status_code=404, detail="Apprenant non trouvé")
+    
+    affective = db.query(LearnerAffectiveState).filter(
+        LearnerAffectiveState.learner_id == learner_id
+    ).first()
+    
+    if not affective:
+        raise HTTPException(status_code=404, detail="État affectif non trouvé")
+    
+    profile = get_affective_profile(
+        affective.motivation,
+        affective.frustration,
+        affective.confidence,
+        affective.stress
+    )
+    
+    return profile
+
+
+@router.get("/feedback-type/{learner_id}")
+def get_feedback_type_endpoint(
+    learner_id: int,
+    db: Session = Depends(get_db)
+):
+    """Obtenir le type de feedback recommandé."""
+    learner = db.query(Learner).get(learner_id)
+    if not learner:
+        raise HTTPException(status_code=404, detail="Apprenant non trouvé")
+    
+    affective = db.query(LearnerAffectiveState).filter(
+        LearnerAffectiveState.learner_id == learner_id
+    ).first()
+    
+    if not affective:
+        raise HTTPException(status_code=404, detail="État affectif non trouvé")
+    
+    feedback_type = get_feedback_type(
+        affective.motivation,
+        affective.frustration,
+        affective.confidence,
+        affective.stress
+    )
+    
+    return {
+        "learner_id": learner_id,
+        "feedback_type": feedback_type,
+        "description": _get_feedback_description(feedback_type)
+    }
+
+
+def _get_feedback_description(feedback_type: str) -> str:
+    """Obtenir une description du type de feedback."""
+    descriptions = {
+        "encouragement": "Fournir des encouragements et renforcer la motivation",
+        "aide": "Fournir une aide équilibrée avec guidance",
+        "challenge": "Proposer des défis plus complexes",
+        "soutien": "Fournir un soutien émotionnel et pédagogique"
+    }
+    return descriptions.get(feedback_type, "Type de feedback inconnu")
+
+
+### FILE: ./api/concepts.py
+
+"""Routes FastAPI pour les concepts pédagogiques."""
+from fastapi import APIRouter, Depends, HTTPException
+from sqlalchemy.orm import Session
+from app.models.concept import Concept
+from app.schemas.concept import ConceptCreate, ConceptResponse
+from app.core.deps import get_db
+
+router = APIRouter(prefix="/concepts", tags=["Concepts"])
+
+
+@router.post("/", response_model=ConceptResponse)
+def create_concept(concept: ConceptCreate, db: Session = Depends(get_db)):
+    """Créer un nouveau concept pédagogique."""
+    existing = db.query(Concept).filter(Concept.name == concept.name).first()
+    if existing:
+        raise HTTPException(status_code=400, detail="Concept déjà existant")
+    
+    new_concept = Concept(**concept.dict())
+    db.add(new_concept)
+    db.commit()
+    db.refresh(new_concept)
+    return new_concept
+
+
+@router.get("/", response_model=list[ConceptResponse])
+def list_concepts(db: Session = Depends(get_db)):
+    """Récupérer la liste de tous les concepts."""
+    return db.query(Concept).all()
+
+
+@router.get("/{concept_id}", response_model=ConceptResponse)
+def get_concept(concept_id: int, db: Session = Depends(get_db)):
+    """Récupérer un concept par ID."""
+    concept = db.query(Concept).get(concept_id)
+    if not concept:
+        raise HTTPException(status_code=404, detail="Concept non trouvé")
+    return concept
+
+
+### FILE: ./api/__init__.py
+
+
+
+### FILE: ./api/learners.py
+
+"""Routes FastAPI pour les apprenants."""
+from fastapi import APIRouter, Depends, HTTPException
+from sqlalchemy.orm import Session
+from app.core.deps import get_db
+from app.models.learner import Learner
+from app.schemas.learner import LearnerCreate, LearnerResponse
+
+router = APIRouter(prefix="/learners", tags=["Learners"])
+
+
+@router.post("/", response_model=LearnerResponse)
+def create_learner(learner: LearnerCreate, db: Session = Depends(get_db)):
+    """Créer un nouvel apprenant."""
+    existing = db.query(Learner).filter(Learner.email == learner.email).first()
+    if existing:
+        raise HTTPException(status_code=400, detail="Email déjà utilisé")
+
+    new_learner = Learner(**learner.dict())
+    db.add(new_learner)
+    db.commit()
+    db.refresh(new_learner)
+    return new_learner
+
+
+@router.get("/", response_model=list[LearnerResponse])
+def list_learners(db: Session = Depends(get_db)):
+    """Récupérer la liste des apprenants."""
+    return db.query(Learner).all()
+
+
+@router.get("/{learner_id}", response_model=LearnerResponse)
+def get_learner(learner_id: int, db: Session = Depends(get_db)):
+    """Récupérer un apprenant par ID."""
+    learner = db.query(Learner).get(learner_id)
+    if not learner:
+        raise HTTPException(status_code=404, detail="Apprenant non trouvé")
+    return learner
+
+
+### FILE: ./api/adaptation.py
+
+"""Routes FastAPI pour le moteur d'adaptation intelligente."""
+from fastapi import APIRouter, Depends, HTTPException, Query
+from sqlalchemy.orm import Session
+from app.core.deps import get_db
+from app.models.learner import Learner
+from app.models.concept import Concept
+from app.services.adaptation_engine import (
+    process_new_performance,
+    get_adaptation_summary
+)
+
+router = APIRouter(prefix="/adaptation", tags=["Adaptation Engine"])
+
+
+@router.post("/process")
+def process_adaptation(
+    learner_id: int,
+    concept_id: int,
+    score: float = Query(ge=0.0, le=100.0),
+    activity_type: str = "exercice",
+    time_spent: int = None,
+    db: Session = Depends(get_db)
+):
+    """
+    Orchestration complète après une nouvelle performance.
+    
+    Flux:
+    1. Enregistrer la performance
+    2. Mettre à jour le niveau de maîtrise
+    3. Mettre à jour l'état affectif
+    4. Générer une recommandation pédagogique
+    
+    Args:
+        learner_id: ID de l'apprenant
+        concept_id: ID du concept
+        score: Score obtenu (0-100)
+        activity_type: Type d'activité (quiz, exercice, test)
+        time_spent: Temps passé en secondes
+    
+    Returns:
+        Résultats complets de l'adaptation
+    """
+    # Vérifier que l'apprenant existe
+    learner = db.query(Learner).get(learner_id)
+    if not learner:
+        raise HTTPException(status_code=404, detail="Apprenant non trouvé")
+    
+    # Vérifier que le concept existe
+    concept = db.query(Concept).get(concept_id)
+    if not concept:
+        raise HTTPException(status_code=404, detail="Concept non trouvé")
+    
+    # Valider le score
+    if not 0 <= score <= 100:
+        raise HTTPException(status_code=400, detail="Le score doit être entre 0 et 100")
+    
+    # Valider le type d'activité
+    valid_types = ["quiz", "exercice", "test", "projet", "devoir"]
+    if activity_type not in valid_types:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Type d'activité invalide. Doit être l'un de: {', '.join(valid_types)}"
+        )
+    
+    # Traiter la performance et générer l'adaptation
+    result = process_new_performance(
+        db,
+        learner_id,
+        concept_id,
+        score,
+        activity_type,
+        time_spent
+    )
+    
+    return result
+
+
+@router.get("/summary/{learner_id}")
+def get_adaptation_summary_endpoint(
+    learner_id: int,
+    db: Session = Depends(get_db)
+):
+    """
+    Obtenir un résumé complet de l'adaptation pour un apprenant.
+    
+    Inclut:
+    - Modèle de connaissances
+    - Modèle de performances
+    - Modèle affectif
+    - Modèle comportemental
+    - Statut global
+    
+    Args:
+        learner_id: ID de l'apprenant
+    
+    Returns:
+        Résumé complet de l'adaptation
+    """
+    # Vérifier que l'apprenant existe
+    learner = db.query(Learner).get(learner_id)
+    if not learner:
+        raise HTTPException(status_code=404, detail="Apprenant non trouvé")
+    
+    summary = get_adaptation_summary(db, learner_id)
+    
+    return summary
+
+
+@router.post("/batch-process")
+def batch_process_adaptations(
+    data: list[dict],
+    db: Session = Depends(get_db)
+):
+    """
+    Traiter plusieurs performances en batch.
+    
+    Args:
+        data: Liste de dictionnaires avec learner_id, concept_id, score
+    
+    Returns:
+        Résultats pour chaque performance
+    """
+    results = []
+    
+    for item in data:
+        try:
+            learner_id = item.get("learner_id")
+            concept_id = item.get("concept_id")
+            score = item.get("score")
+            activity_type = item.get("activity_type", "exercice")
+            time_spent = item.get("time_spent")
+            
+            # Vérifications basiques
+            if not all([learner_id, concept_id, score is not None]):
+                results.append({
+                    "status": "error",
+                    "message": "Données manquantes (learner_id, concept_id, score)"
+                })
+                continue
+            
+            if not 0 <= score <= 100:
+                results.append({
+                    "status": "error",
+                    "learner_id": learner_id,
+                    "message": "Score invalide"
+                })
+                continue
+            
+            # Traiter la performance
+            result = process_new_performance(
+                db,
+                learner_id,
+                concept_id,
+                score,
+                activity_type,
+                time_spent
+            )
+            
+            results.append({
+                "status": "success",
+                "learner_id": learner_id,
+                "concept_id": concept_id,
+                "score": score,
+                "recommendation": result["recommendation"]
+            })
+        
+        except Exception as e:
+            results.append({
+                "status": "error",
+                "message": str(e)
+            })
+    
+    return {
+        "total": len(data),
+        "successful": len([r for r in results if r.get("status") == "success"]),
+        "failed": len([r for r in results if r.get("status") == "error"]),
+        "results": results
+    }
+
+
+@router.get("/health")
+def adaptation_engine_health(db: Session = Depends(get_db)):
+    """Vérifier la santé du moteur d'adaptation."""
+    try:
+        # Tester la connexion à la base de données
+        db.execute("SELECT 1")
+        
+        return {
+            "status": "healthy",
+            "engine": "Adaptation Engine",
+            "version": "1.0.0",
+            "message": "Moteur d'adaptation opérationnel"
+        }
+    except Exception as e:
+        raise HTTPException(
+            status_code=503,
+            detail=f"Moteur d'adaptation indisponible: {str(e)}"
+        )
+
+
+### FILE: ./api/learner_knowledge.py
+
+"""Routes FastAPI pour le modèle de connaissances de l'apprenant."""
+from fastapi import APIRouter, Depends, HTTPException
+from sqlalchemy.orm import Session
+from app.models.learner_knowledge import LearnerKnowledge
+from app.models.learner import Learner
+from app.models.concept import Concept
+from app.schemas.learner_knowledge import (
+    LearnerKnowledgeCreate,
+    LearnerKnowledgeResponse
+)
+from app.core.deps import get_db
+from app.services.knowledge_update_service import get_mastery_label
+from app.services.knowledge_inference_service import (
+    get_learner_knowledge_summary,
+    infer_knowledge_from_activity
+)
+
+router = APIRouter(
+    prefix="/learner-knowledge",
+    tags=["Learner Knowledge"]
+)
+
+
+@router.post("/", response_model=LearnerKnowledgeResponse)
+def set_knowledge(
+    data: LearnerKnowledgeCreate,
+    db: Session = Depends(get_db)
+):
+    """Créer ou mettre à jour le niveau de maîtrise d'un concept pour un apprenant."""
+    # Vérifier que l'apprenant existe
+    learner = db.query(Learner).get(data.learner_id)
+    if not learner:
+        raise HTTPException(status_code=404, detail="Apprenant non trouvé")
+    
+    # Vérifier que le concept existe
+    concept = db.query(Concept).get(data.concept_id)
+    if not concept:
+        raise HTTPException(status_code=404, detail="Concept non trouvé")
+    
+    # Vérifier si l'enregistrement existe déjà
+    existing = db.query(LearnerKnowledge).filter(
+        LearnerKnowledge.learner_id == data.learner_id,
+        LearnerKnowledge.concept_id == data.concept_id
+    ).first()
+    
+    if existing:
+        # Mettre à jour
+        existing.mastery_level = data.mastery_level
+        db.commit()
+        db.refresh(existing)
+        return existing
+    else:
+        # Créer
+        lk = LearnerKnowledge(**data.dict())
+        db.add(lk)
+        db.commit()
+        db.refresh(lk)
+        return lk
+
+
+@router.get("/learner/{learner_id}", response_model=list[LearnerKnowledgeResponse])
+def get_learner_knowledge(
+    learner_id: int,
+    db: Session = Depends(get_db)
+):
+    """Récupérer le modèle de connaissances d'un apprenant."""
+    learner = db.query(Learner).get(learner_id)
+    if not learner:
+        raise HTTPException(status_code=404, detail="Apprenant non trouvé")
+    
+    return db.query(LearnerKnowledge).filter(
+        LearnerKnowledge.learner_id == learner_id
+    ).all()
+
+
+@router.get("/{learner_id}/{concept_id}", response_model=LearnerKnowledgeResponse)
+def get_knowledge_for_concept(
+    learner_id: int,
+    concept_id: int,
+    db: Session = Depends(get_db)
+):
+    """Récupérer le niveau de maîtrise d'un apprenant pour un concept spécifique."""
+    lk = db.query(LearnerKnowledge).filter(
+        LearnerKnowledge.learner_id == learner_id,
+        LearnerKnowledge.concept_id == concept_id
+    ).first()
+    
+    if not lk:
+        raise HTTPException(status_code=404, detail="Enregistrement de connaissances non trouvé")
+    
+    return lk
+
+
+@router.get("/summary/{learner_id}")
+def get_knowledge_summary(
+    learner_id: int,
+    db: Session = Depends(get_db)
+):
+    """Obtenir un résumé des connaissances d'un apprenant."""
+    learner = db.query(Learner).get(learner_id)
+    if not learner:
+        raise HTTPException(status_code=404, detail="Apprenant non trouvé")
+    
+    return get_learner_knowledge_summary(db, learner_id)
+
+
+@router.post("/update-from-activity/{learner_id}/{concept_id}/{score}")
+def update_knowledge_from_activity(
+    learner_id: int,
+    concept_id: int,
+    score: float,
+    db: Session = Depends(get_db)
+):
+    """Mettre à jour le niveau de maîtrise basé sur une activité."""
+    learner = db.query(Learner).get(learner_id)
+    if not learner:
+        raise HTTPException(status_code=404, detail="Apprenant non trouvé")
+    
+    concept = db.query(Concept).get(concept_id)
+    if not concept:
+        raise HTTPException(status_code=404, detail="Concept non trouvé")
+    
+    if not 0 <= score <= 100:
+        raise HTTPException(status_code=400, detail="Le score doit être entre 0 et 100")
+    
+    lk = infer_knowledge_from_activity(db, learner_id, concept_id, score)
+    
+    return {
+        "learner_id": learner_id,
+        "concept_id": concept_id,
+        "concept_name": concept.name,
+        "score": score,
+        "new_mastery_level": round(lk.mastery_level, 2),
+        "message": "Niveau de maîtrise mis à jour"
+    }
+
+
+@router.delete("/{learner_id}/{concept_id}")
+def delete_knowledge(
+    learner_id: int,
+    concept_id: int,
+    db: Session = Depends(get_db)
+):
+    """Supprimer un enregistrement de connaissances."""
+    lk = db.query(LearnerKnowledge).filter(
+        LearnerKnowledge.learner_id == learner_id,
+        LearnerKnowledge.concept_id == concept_id
+    ).first()
+    
+    if not lk:
+        raise HTTPException(status_code=404, detail="Enregistrement de connaissances non trouvé")
+    
+    db.delete(lk)
+    db.commit()
+    
+    return {"message": "Enregistrement de connaissances supprimé avec succès"}
+
+
+### FILE: ./api/learner_behavior.py
+
+"""Routes FastAPI pour le comportement de l'apprenant."""
+from fastapi import APIRouter, Depends, HTTPException
+from sqlalchemy.orm import Session
+from app.models.learner_behavior import LearnerBehavior
+from app.models.learner import Learner
+from app.schemas.learner_behavior import (
+    LearnerBehaviorCreate,
+    LearnerBehaviorResponse
+)
+from app.core.deps import get_db
+from app.services.behavior_service import (
+    compute_engagement,
+    get_behavior_profile
+)
+
+router = APIRouter(prefix="/behavior", tags=["Learner Behavior"])
+
+
+@router.post("/", response_model=LearnerBehaviorResponse)
+def update_behavior(
+    data: LearnerBehaviorCreate,
+    db: Session = Depends(get_db)
+):
+    """Mettre à jour le profil comportemental d'un apprenant."""
+    learner = db.query(Learner).get(data.learner_id)
+    if not learner:
+        raise HTTPException(status_code=404, detail="Apprenant non trouvé")
+    
+    # Calculer le score d'engagement
+    engagement = compute_engagement(
+        data.sessions_count,
+        data.activities_count,
+        data.total_time_spent
+    )
+    
+    # Vérifier si un enregistrement existe déjà
+    existing = db.query(LearnerBehavior).filter(
+        LearnerBehavior.learner_id == data.learner_id
+    ).first()
+    
+    if existing:
+        # Mettre à jour
+        existing.sessions_count = data.sessions_count
+        existing.activities_count = data.activities_count
+        existing.total_time_spent = data.total_time_spent
+        existing.engagement_score = engagement
+        db.commit()
+        db.refresh(existing)
+        return existing
+    else:
+        # Créer
+        behavior = LearnerBehavior(
+            **data.dict(),
+            engagement_score=engagement
+        )
+        db.add(behavior)
+        db.commit()
+        db.refresh(behavior)
+        return behavior
+
+
+@router.get("/{learner_id}", response_model=LearnerBehaviorResponse)
+def get_behavior(
+    learner_id: int,
+    db: Session = Depends(get_db)
+):
+    """Récupérer le profil comportemental d'un apprenant."""
+    learner = db.query(Learner).get(learner_id)
+    if not learner:
+        raise HTTPException(status_code=404, detail="Apprenant non trouvé")
+    
+    behavior = db.query(LearnerBehavior).filter(
+        LearnerBehavior.learner_id == learner_id
+    ).first()
+    
+    if not behavior:
+        raise HTTPException(status_code=404, detail="Profil comportemental non trouvé")
+    
+    return behavior
+
+
+@router.get("/profile/{learner_id}")
+def get_behavior_profile_endpoint(
+    learner_id: int,
+    db: Session = Depends(get_db)
+):
+    """Obtenir un profil comportemental détaillé."""
+    learner = db.query(Learner).get(learner_id)
+    if not learner:
+        raise HTTPException(status_code=404, detail="Apprenant non trouvé")
+    
+    behavior = db.query(LearnerBehavior).filter(
+        LearnerBehavior.learner_id == learner_id
+    ).first()
+    
+    if not behavior:
+        raise HTTPException(status_code=404, detail="Profil comportemental non trouvé")
+    
+    profile = get_behavior_profile(
+        behavior.sessions_count,
+        behavior.activities_count,
+        behavior.total_time_spent
+    )
+    
+    return profile
+
+
+### FILE: ./api/learner_cognitive.py
+
+"""Routes FastAPI pour le profil cognitif de l'apprenant."""
+from fastapi import APIRouter, Depends, HTTPException
+from sqlalchemy.orm import Session
+from app.models.learner_cognitive import LearnerCognitiveProfile
+from app.models.learner import Learner
+from app.schemas.learner_cognitive import (
+    LearnerCognitiveCreate,
+    LearnerCognitiveResponse
+)
+from app.core.deps import get_db
+
+router = APIRouter(prefix="/cognitive", tags=["Learner Cognitive"])
+
+
+@router.post("/", response_model=LearnerCognitiveResponse)
+def create_cognitive_profile(
+    data: LearnerCognitiveCreate,
+    db: Session = Depends(get_db)
+):
+    """Créer un profil cognitif pour un apprenant."""
+    learner = db.query(Learner).get(data.learner_id)
+    if not learner:
+        raise HTTPException(status_code=404, detail="Apprenant non trouvé")
+    
+    # Vérifier si un profil existe déjà
+    existing = db.query(LearnerCognitiveProfile).filter(
+        LearnerCognitiveProfile.learner_id == data.learner_id
+    ).first()
+    
+    if existing:
+        raise HTTPException(status_code=400, detail="Un profil cognitif existe déjà pour cet apprenant")
+    
+    profile = LearnerCognitiveProfile(**data.dict())
+    db.add(profile)
+    db.commit()
+    db.refresh(profile)
+    return profile
+
+
+@router.get("/{learner_id}", response_model=LearnerCognitiveResponse)
+def get_cognitive_profile(
+    learner_id: int,
+    db: Session = Depends(get_db)
+):
+    """Récupérer le profil cognitif d'un apprenant."""
+    learner = db.query(Learner).get(learner_id)
+    if not learner:
+        raise HTTPException(status_code=404, detail="Apprenant non trouvé")
+    
+    profile = db.query(LearnerCognitiveProfile).filter(
+        LearnerCognitiveProfile.learner_id == learner_id
+    ).first()
+    
+    if not profile:
+        raise HTTPException(status_code=404, detail="Profil cognitif non trouvé")
+    
+    return profile
+
+
+@router.put("/{learner_id}", response_model=LearnerCognitiveResponse)
+def update_cognitive_profile(
+    learner_id: int,
+    data: LearnerCognitiveCreate,
+    db: Session = Depends(get_db)
+):
+    """Mettre à jour le profil cognitif d'un apprenant."""
+    learner = db.query(Learner).get(learner_id)
+    if not learner:
+        raise HTTPException(status_code=404, detail="Apprenant non trouvé")
+    
+    profile = db.query(LearnerCognitiveProfile).filter(
+        LearnerCognitiveProfile.learner_id == learner_id
+    ).first()
+    
+    if not profile:
+        raise HTTPException(status_code=404, detail="Profil cognitif non trouvé")
+    
+    profile.learning_style = data.learning_style
+    profile.learning_speed = data.learning_speed
+    profile.autonomy_level = data.autonomy_level
+    
+    db.commit()
+    db.refresh(profile)
+    return profile
+
+
+@router.delete("/{learner_id}")
+def delete_cognitive_profile(
+    learner_id: int,
+    db: Session = Depends(get_db)
+):
+    """Supprimer le profil cognitif d'un apprenant."""
+    learner = db.query(Learner).get(learner_id)
+    if not learner:
+        raise HTTPException(status_code=404, detail="Apprenant non trouvé")
+    
+    profile = db.query(LearnerCognitiveProfile).filter(
+        LearnerCognitiveProfile.learner_id == learner_id
+    ).first()
+    
+    if not profile:
+        raise HTTPException(status_code=404, detail="Profil cognitif non trouvé")
+    
+    db.delete(profile)
+    db.commit()
+    
+    return {"message": "Profil cognitif supprimé avec succès"}
+
+
+### FILE: ./api/learner_performance.py
+
+"""Routes FastAPI pour les performances de l'apprenant."""
+from fastapi import APIRouter, Depends, HTTPException
+from sqlalchemy.orm import Session
+from app.models.learner_performance import LearnerPerformance
+from app.models.learner import Learner
+from app.models.concept import Concept
+from app.schemas.learner_performance import (
+    LearnerPerformanceCreate,
+    LearnerPerformanceResponse
+)
+from app.core.deps import get_db
+from app.services.performance_service import (
+    get_learner_performance_stats,
+    get_concept_performance_summary,
+    identify_weak_concepts
+)
+
+router = APIRouter(
+    prefix="/performances",
+    tags=["Learner Performance"]
+)
+
+
+@router.post("/", response_model=LearnerPerformanceResponse)
+def record_performance(
+    data: LearnerPerformanceCreate,
+    db: Session = Depends(get_db)
+):
+    """Enregistrer une performance d'apprenant."""
+    # Vérifier que l'apprenant existe
+    learner = db.query(Learner).get(data.learner_id)
+    if not learner:
+        raise HTTPException(status_code=404, detail="Apprenant non trouvé")
+    
+    # Vérifier que le concept existe
+    concept = db.query(Concept).get(data.concept_id)
+    if not concept:
+        raise HTTPException(status_code=404, detail="Concept non trouvé")
+    
+    performance = LearnerPerformance(**data.dict())
+    db.add(performance)
+    db.commit()
+    db.refresh(performance)
+    return performance
+
+
+@router.get("/learner/{learner_id}", response_model=list[LearnerPerformanceResponse])
+def get_learner_performances(
+    learner_id: int,
+    db: Session = Depends(get_db)
+):
+    """Récupérer toutes les performances d'un apprenant."""
+    learner = db.query(Learner).get(learner_id)
+    if not learner:
+        raise HTTPException(status_code=404, detail="Apprenant non trouvé")
+    
+    return db.query(LearnerPerformance).filter(
+        LearnerPerformance.learner_id == learner_id
+    ).order_by(LearnerPerformance.created_at.desc()).all()
+
+
+@router.get("/learner/{learner_id}/concept/{concept_id}", response_model=list[LearnerPerformanceResponse])
+def get_learner_performances_for_concept(
+    learner_id: int,
+    concept_id: int,
+    db: Session = Depends(get_db)
+):
+    """Récupérer les performances d'un apprenant pour un concept spécifique."""
+    learner = db.query(Learner).get(learner_id)
+    if not learner:
+        raise HTTPException(status_code=404, detail="Apprenant non trouvé")
+    
+    concept = db.query(Concept).get(concept_id)
+    if not concept:
+        raise HTTPException(status_code=404, detail="Concept non trouvé")
+    
+    return db.query(LearnerPerformance).filter(
+        LearnerPerformance.learner_id == learner_id,
+        LearnerPerformance.concept_id == concept_id
+    ).order_by(LearnerPerformance.created_at.desc()).all()
+
+
+@router.get("/stats/{learner_id}")
+def get_performance_stats(
+    learner_id: int,
+    db: Session = Depends(get_db)
+):
+    """Obtenir les statistiques de performance d'un apprenant."""
+    learner = db.query(Learner).get(learner_id)
+    if not learner:
+        raise HTTPException(status_code=404, detail="Apprenant non trouvé")
+    
+    return get_learner_performance_stats(db, learner_id)
+
+
+@router.get("/stats/{learner_id}/concept/{concept_id}")
+def get_performance_stats_for_concept(
+    learner_id: int,
+    concept_id: int,
+    db: Session = Depends(get_db)
+):
+    """Obtenir les statistiques de performance pour un concept spécifique."""
+    learner = db.query(Learner).get(learner_id)
+    if not learner:
+        raise HTTPException(status_code=404, detail="Apprenant non trouvé")
+    
+    concept = db.query(Concept).get(concept_id)
+    if not concept:
+        raise HTTPException(status_code=404, detail="Concept non trouvé")
+    
+    return get_learner_performance_stats(db, learner_id, concept_id)
+
+
+@router.get("/summary/{learner_id}")
+def get_performance_summary(
+    learner_id: int,
+    db: Session = Depends(get_db)
+):
+    """Obtenir un résumé des performances par concept."""
+    learner = db.query(Learner).get(learner_id)
+    if not learner:
+        raise HTTPException(status_code=404, detail="Apprenant non trouvé")
+    
+    return get_concept_performance_summary(db, learner_id)
+
+
+@router.get("/weak-concepts/{learner_id}")
+def get_weak_concepts(
+    learner_id: int,
+    threshold: float = 60.0,
+    db: Session = Depends(get_db)
+):
+    """Identifier les concepts où l'apprenant a des difficultés."""
+    learner = db.query(Learner).get(learner_id)
+    if not learner:
+        raise HTTPException(status_code=404, detail="Apprenant non trouvé")
+    
+    weak_concepts = identify_weak_concepts(db, learner_id, threshold)
+    
+    return {
+        "learner_id": learner_id,
+        "threshold": threshold,
+        "weak_concepts_count": len(weak_concepts),
+        "weak_concepts": weak_concepts
+    }
+
+
+### FILE: ./api/learning_history.py
+
+"""Routes FastAPI pour l'historique d'apprentissage."""
+from fastapi import APIRouter, Depends, HTTPException
+from sqlalchemy.orm import Session
+from app.models.learning_history import LearningHistory
+from app.models.learner import Learner
+from app.schemas.learning_history import (
+    LearningHistoryCreate,
+    LearningHistoryResponse
+)
+from app.core.deps import get_db
+
+router = APIRouter(
+    prefix="/learning-history",
+    tags=["Learning History"]
+)
+
+
+@router.post("/", response_model=LearningHistoryResponse)
+def create_history(
+    history: LearningHistoryCreate,
+    db: Session = Depends(get_db)
+):
+    """Créer un nouvel enregistrement d'historique d'apprentissage."""
+    learner = db.query(Learner).get(history.learner_id)
+    if not learner:
+        raise HTTPException(status_code=404, detail="Apprenant non trouvé")
+
+    new_history = LearningHistory(**history.dict())
+    db.add(new_history)
+    db.commit()
+    db.refresh(new_history)
+    return new_history
+
+
+@router.get("/learner/{learner_id}", response_model=list[LearningHistoryResponse])
+def get_learner_history(
+    learner_id: int,
+    db: Session = Depends(get_db)
+):
+    """Récupérer l'historique d'apprentissage d'un apprenant."""
+    return (
+        db.query(LearningHistory)
+        .filter(LearningHistory.learner_id == learner_id)
+        .order_by(LearningHistory.created_at.desc())
+        .all()
+    )
+
+
+### FILE: ./models/learner_affective.py
+
+"""Modèle SQLAlchemy pour l'état affectif de l'apprenant."""
+#État affectif courant de l’apprenant
+
+from sqlalchemy import Column, Integer, ForeignKey, Float, DateTime
+from sqlalchemy.sql import func
+from sqlalchemy.orm import relationship
+from app.core.database import Base
+
+
+class LearnerAffectiveState(Base):
+    """Enregistre l'état affectif d'un apprenant."""
+    __tablename__ = "learner_affective_states"
+
+    id = Column(Integer, primary_key=True, index=True)
+    learner_id = Column(Integer, ForeignKey("learners.id"), nullable=False)
+
+    motivation = Column(Float, default=0.5)      # 0.0 à 1.0
+    frustration = Column(Float, default=0.0)     # 0.0 à 1.0
+    confidence = Column(Float, default=0.5)      # 0.0 à 1.0
+    stress = Column(Float, default=0.0)          # 0.0 à 1.0
+
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+    updated_at = Column(DateTime(timezone=True), onupdate=func.now())
+
+    learner = relationship("Learner")
+
+
+### FILE: ./models/concept.py
+
+"""Modèle SQLAlchemy pour les concepts pédagogiques."""
+#Définit les concepts / compétences du domaine enseigné.
+# C'est la Base du modèle cognitif et un Support pour l’overlay model
+
+from sqlalchemy import Column, Integer, String, Text, Float
+from app.core.database import Base
+
+
+class Concept(Base):
+    """Représente un concept pédagogique (notion à enseigner)."""
+    __tablename__ = "concepts"
+
+    id = Column(Integer, primary_key=True, index=True)
+    name = Column(String(100), unique=True, nullable=False)
+    description = Column(Text, nullable=True)
+
+    p_init = Column(Float, nullable=False, default=0.2)
+    p_transit = Column(Float, nullable=False, default=0.15)
+    p_guess = Column(Float, nullable=False, default=0.2)
+    p_slip = Column(Float, nullable=False, default=0.1)
+
+
+### FILE: ./models/learner.py
+
+from sqlalchemy import Column, Integer, String, DateTime
+from sqlalchemy.sql import func
+from sqlalchemy.orm import relationship
+from app.core.database import Base
+
+
+class Learner(Base):
+    __tablename__ = "learners"
+
+    id = Column(Integer, primary_key=True, index=True)
+    first_name = Column(String(100), nullable=False)
+    last_name = Column(String(100), nullable=False)
+    email = Column(String(150), unique=True, index=True, nullable=False)
+    level = Column(String(50), nullable=True)
+    field_of_study = Column(String(100), nullable=True)
+
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+
+    learning_histories = relationship(
+        "LearningHistory",
+        back_populates="learner",
+        cascade="all, delete"
+    )
+
+    knowledge = relationship(
+        "LearnerKnowledge",
+        back_populates="learner",
+        cascade="all, delete"
+    )
+
+
+### FILE: ./models/__init__.py
+
+"""Modèles SQLAlchemy."""
+from app.models.learner import Learner
+from app.models.learning_history import LearningHistory
+from app.models.concept import Concept
+from app.models.learner_knowledge import LearnerKnowledge
+from app.models.learner_performance import LearnerPerformance
+from app.models.learner_behavior import LearnerBehavior
+from app.models.learner_cognitive import LearnerCognitiveProfile
+from app.models.learner_affective import LearnerAffectiveState
+
+__all__ = [
+    "Learner",
+    "LearningHistory",
+    "Concept",
+    "LearnerKnowledge",
+    "LearnerPerformance",
+    "LearnerBehavior",
+    "LearnerCognitiveProfile",
+    "LearnerAffectiveState"
+]
+
+
+### FILE: ./models/learner_knowledge.py
+
+"""Modèle SQLAlchemy pour le modèle de connaissances de l'apprenant."""
+#Lien entre apprenant et connaissances
+# implémente l’overlay model
+
+from sqlalchemy import Column, Integer, ForeignKey, Float
+from sqlalchemy.orm import relationship
+from app.core.database import Base
+
+
+class LearnerKnowledge(Base):
+    """Représente le niveau de maîtrise d'un apprenant sur un concept."""
+    __tablename__ = "learner_knowledge"
+
+    id = Column(Integer, primary_key=True, index=True)
+    learner_id = Column(Integer, ForeignKey("learners.id"), nullable=False)
+    concept_id = Column(Integer, ForeignKey("concepts.id"), nullable=False)
+
+    mastery_level = Column(Float, default=0.0)  # entre 0 et 1
+
+    learner = relationship("Learner", back_populates="knowledge")
+    concept = relationship("Concept")
+
+
+### FILE: ./models/learner_behavior.py
+
+"""Modèle SQLAlchemy pour le comportement de l'apprenant."""
+#Modélise le comportement d’apprentissage
+
+from sqlalchemy import Column, Integer, ForeignKey, Float, DateTime
+from sqlalchemy.sql import func
+from sqlalchemy.orm import relationship
+from app.core.database import Base
+
+
+class LearnerBehavior(Base):
+    """Enregistre les indicateurs comportementaux d'un apprenant."""
+    __tablename__ = "learner_behaviors"
+
+    id = Column(Integer, primary_key=True, index=True)
+    learner_id = Column(Integer, ForeignKey("learners.id"), nullable=False)
+
+    sessions_count = Column(Integer, default=0)
+    activities_count = Column(Integer, default=0)
+    total_time_spent = Column(Integer, default=0)  # en secondes
+
+    engagement_score = Column(Float, default=0.0)  # 0 à 1
+
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+    updated_at = Column(DateTime(timezone=True), onupdate=func.now())
+
+    learner = relationship("Learner")
+
+
+### FILE: ./models/learner_cognitive.py
+
+"""Modèle SQLAlchemy pour le profil cognitif de l'apprenant."""
+from sqlalchemy import Column, Integer, String, Float, ForeignKey, DateTime
+from sqlalchemy.sql import func
+from sqlalchemy.orm import relationship
+from app.core.database import Base
+
+
+class LearnerCognitiveProfile(Base):
+    """Enregistre le profil cognitif d'un apprenant."""
+    __tablename__ = "learner_cognitive_profiles"
+
+    id = Column(Integer, primary_key=True, index=True)
+    learner_id = Column(Integer, ForeignKey("learners.id"), nullable=False)
+
+    learning_style = Column(String(50), nullable=True)  # visuel, auditif, kinesthésique
+    learning_speed = Column(Float, nullable=True)       # 0 à 1 (lent à rapide)
+    autonomy_level = Column(Float, nullable=True)       # 0 à 1 (dépendant à autonome)
+
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+    updated_at = Column(DateTime(timezone=True), onupdate=func.now())
+
+    learner = relationship("Learner")
+
+
+### FILE: ./models/learner_performance.py
+
+"""Modèle SQLAlchemy pour les performances de l'apprenant."""
+from sqlalchemy import Column, Integer, ForeignKey, Float, DateTime, String
+from sqlalchemy.sql import func
+from sqlalchemy.orm import relationship
+from app.core.database import Base
+
+
+class LearnerPerformance(Base):
+    """Enregistre les performances d'un apprenant sur un concept."""
+    __tablename__ = "learner_performances"
+
+    id = Column(Integer, primary_key=True, index=True)
+    learner_id = Column(Integer, ForeignKey("learners.id"), nullable=False)
+    concept_id = Column(Integer, ForeignKey("concepts.id"), nullable=False)
+
+    activity_type = Column(String(50), nullable=False)  # quiz, exercice, test
+    score = Column(Float, nullable=False)               # 0 - 100
+    time_spent = Column(Integer, nullable=True)         # en secondes
+    attempts = Column(Integer, default=1)
+
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+
+    learner = relationship("Learner")
+    concept = relationship("Concept")
+
+
+### FILE: ./models/learning_history.py
+
+"""Modèle SQLAlchemy pour l'historique d'apprentissage."""
+from sqlalchemy import Column, Integer, String, ForeignKey, DateTime, Boolean
+from sqlalchemy.sql import func
+from sqlalchemy.orm import relationship
+from app.core.database import Base
+
+
+class LearningHistory(Base):
+    """Historique des interactions apprenant–système."""
+    __tablename__ = "learning_histories"
+
+    id = Column(Integer, primary_key=True, index=True)
+    learner_id = Column(Integer, ForeignKey("learners.id"), nullable=False)
+
+    activity_type = Column(String(50), nullable=False)
+    activity_ref = Column(String(100), nullable=True)
+
+    success = Column(Boolean, nullable=True)
+    score = Column(Integer, nullable=True)
+    time_spent = Column(Integer, nullable=True)  # en secondes
+
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+
+    learner = relationship("Learner", back_populates="learning_histories")
+
+
+### FILE: ./__init__.py
+
+
+
+### FILE: ./services/performance_service.py
+
+"""Service d'analyse des performances de l'apprenant."""
+from typing import List
+from sqlalchemy.orm import Session
+from sqlalchemy import func
+from app.models.learner_performance import LearnerPerformance
+from app.models.concept import Concept
+
+
+def compute_progress(scores: List[float]) -> float:
+    """
+    Calcul simple de la progression.
+    
+    Retourne la différence entre le dernier score et le premier.
+    
+    Args:
+        scores: Liste des scores (0-100)
+    
+    Returns:
+        Progression (peut être négative)
+    """
+    if len(scores) < 2:
+        return 0.0
+    
+    return scores[-1] - scores[0]
+
+
+def compute_average_score(scores: List[float]) -> float:
+    """
+    Calcul du score moyen.
+    
+    Args:
+        scores: Liste des scores (0-100)
+    
+    Returns:
+        Score moyen
+    """
+    if not scores:
+        return 0.0
+    
+    return sum(scores) / len(scores)
+
+
+def compute_trend(scores: List[float]) -> str:
+    """
+    Déterminer la tendance des performances.
+    
+    Args:
+        scores: Liste des scores (0-100)
+    
+    Returns:
+        "improving", "stable", ou "declining"
+    """
+    if len(scores) < 2:
+        return "stable"
+    
+    # Comparer les 3 derniers scores avec les 3 premiers
+    if len(scores) >= 3:
+        recent_avg = sum(scores[-3:]) / 3
+        earlier_avg = sum(scores[:3]) / 3
+    else:
+        recent_avg = scores[-1]
+        earlier_avg = scores[0]
+    
+    difference = recent_avg - earlier_avg
+    
+    if difference > 5:
+        return "improving"
+    elif difference < -5:
+        return "declining"
+    else:
+        return "stable"
+
+
+def performance_indicator(score: float, time_spent: int = None) -> str:
+    """
+    Indicateur qualitatif de performance.
+    
+    Args:
+        score: Score obtenu (0-100)
+        time_spent: Temps passé en secondes (optionnel)
+    
+    Returns:
+        Label: "excellent", "bon", "moyen", ou "faible"
+    """
+    if score >= 80:
+        return "excellent"
+    elif score >= 60:
+        return "bon"
+    elif score >= 40:
+        return "moyen"
+    else:
+        return "faible"
+
+
+def get_learner_performance_stats(
+    db: Session,
+    learner_id: int,
+    concept_id: int = None
+) -> dict:
+    """
+    Obtenir les statistiques de performance d'un apprenant.
+    
+    Args:
+        db: Session de base de données
+        learner_id: ID de l'apprenant
+        concept_id: ID du concept (optionnel, pour filtrer)
+    
+    Returns:
+        Dictionnaire avec statistiques
+    """
+    query = db.query(LearnerPerformance).filter(
+        LearnerPerformance.learner_id == learner_id
+    )
+    
+    if concept_id:
+        query = query.filter(LearnerPerformance.concept_id == concept_id)
+    
+    performances = query.order_by(LearnerPerformance.created_at).all()
+    
+    if not performances:
+        return {
+            "learner_id": learner_id,
+            "concept_id": concept_id,
+            "total_activities": 0,
+            "average_score": 0.0,
+            "best_score": 0.0,
+            "worst_score": 0.0,
+            "trend": "stable",
+            "total_time_spent": 0,
+            "activities": []
+        }
+    
+    scores = [p.score for p in performances]
+    times = [p.time_spent for p in performances if p.time_spent]
+    
+    return {
+        "learner_id": learner_id,
+        "concept_id": concept_id,
+        "total_activities": len(performances),
+        "average_score": round(compute_average_score(scores), 2),
+        "best_score": max(scores),
+        "worst_score": min(scores),
+        "progress": round(compute_progress(scores), 2),
+        "trend": compute_trend(scores),
+        "total_time_spent": sum(times) if times else 0,
+        "average_time_per_activity": round(sum(times) / len(times), 2) if times else 0,
+        "activities": [
+            {
+                "id": p.id,
+                "activity_type": p.activity_type,
+                "score": p.score,
+                "indicator": performance_indicator(p.score, p.time_spent),
+                "time_spent": p.time_spent,
+                "attempts": p.attempts,
+                "created_at": p.created_at.isoformat()
+            }
+            for p in performances
+        ]
+    }
+
+
+def get_concept_performance_summary(
+    db: Session,
+    learner_id: int
+) -> dict:
+    """
+    Obtenir un résumé des performances par concept.
+    
+    Args:
+        db: Session de base de données
+        learner_id: ID de l'apprenant
+    
+    Returns:
+        Dictionnaire avec performances par concept
+    """
+    performances = db.query(LearnerPerformance).filter(
+        LearnerPerformance.learner_id == learner_id
+    ).all()
+    
+    if not performances:
+        return {
+            "learner_id": learner_id,
+            "total_concepts": 0,
+            "overall_average": 0.0,
+            "concepts": []
+        }
+    
+    # Grouper par concept
+    concept_data = {}
+    for perf in performances:
+        if perf.concept_id not in concept_data:
+            concept_data[perf.concept_id] = {
+                "concept_id": perf.concept_id,
+                "concept_name": perf.concept.name if perf.concept else "Unknown",
+                "scores": [],
+                "activities": 0
+            }
+        concept_data[perf.concept_id]["scores"].append(perf.score)
+        concept_data[perf.concept_id]["activities"] += 1
+    
+    # Calculer les statistiques par concept
+    concepts_summary = []
+    all_scores = []
+    
+    for concept_id, data in concept_data.items():
+        avg_score = compute_average_score(data["scores"])
+        concepts_summary.append({
+            "concept_id": concept_id,
+            "concept_name": data["concept_name"],
+            "average_score": round(avg_score, 2),
+            "best_score": max(data["scores"]),
+            "worst_score": min(data["scores"]),
+            "activities": data["activities"],
+            "trend": compute_trend(data["scores"]),
+            "indicator": performance_indicator(avg_score)
+        })
+        all_scores.extend(data["scores"])
+    
+    # Trier par score moyen décroissant
+    concepts_summary.sort(key=lambda x: x["average_score"], reverse=True)
+    
+    return {
+        "learner_id": learner_id,
+        "total_concepts": len(concepts_summary),
+        "overall_average": round(compute_average_score(all_scores), 2),
+        "concepts": concepts_summary
+    }
+
+
+def identify_weak_concepts(
+    db: Session,
+    learner_id: int,
+    threshold: float = 60.0
+) -> List[dict]:
+    """
+    Identifier les concepts où l'apprenant a des difficultés.
+    
+    Args:
+        db: Session de base de données
+        learner_id: ID de l'apprenant
+        threshold: Seuil de score pour considérer comme faible (défaut: 60)
+    
+    Returns:
+        Liste des concepts faibles
+    """
+    summary = get_concept_performance_summary(db, learner_id)
+    
+    weak_concepts = [
+        c for c in summary["concepts"]
+        if c["average_score"] < threshold
+    ]
+    
+    return weak_concepts
+
+
+### FILE: ./services/behavior_service.py
+
+"""Service d'analyse du comportement de l'apprenant."""
+
+
+def compute_engagement(
+    sessions: int,
+    activities: int,
+    time_spent: int
+) -> float:
+    """
+    Calcul du score d'engagement.
+    
+    Formule pondérée:
+    - Sessions: 30% (fréquence de connexion)
+    - Activités: 40% (nombre d'activités réalisées)
+    - Temps: 30% (temps total passé)
+    
+    Args:
+        sessions: Nombre de sessions
+        activities: Nombre d'activités réalisées
+        time_spent: Temps total en secondes
+    
+    Returns:
+        Score d'engagement (0.0 à 1.0)
+    """
+    # Normaliser les valeurs
+    sessions_score = min(sessions / 20, 1.0)  # Max 20 sessions
+    activities_score = min(activities / 50, 1.0)  # Max 50 activités
+    time_score = min(time_spent / 36000, 1.0)  # Max 10 heures
+    
+    # Calcul pondéré
+    engagement = (sessions_score * 0.3) + (activities_score * 0.4) + (time_score * 0.3)
+    
+    return min(1.0, max(0.0, engagement))
+
+
+def get_engagement_label(engagement_score: float) -> str:
+    """
+    Obtenir un label textuel pour le score d'engagement.
+    
+    Args:
+        engagement_score: Score d'engagement (0.0 à 1.0)
+    
+    Returns:
+        Label descriptif
+    """
+    if engagement_score >= 0.8:
+        return "Très engagé"
+    elif engagement_score >= 0.6:
+        return "Engagé"
+    elif engagement_score >= 0.4:
+        return "Modérément engagé"
+    elif engagement_score >= 0.2:
+        return "Peu engagé"
+    else:
+        return "Désengagé"
+
+
+def compute_activity_rate(activities: int, sessions: int) -> float:
+    """
+    Calcul du taux d'activité par session.
+    
+    Args:
+        activities: Nombre d'activités réalisées
+        sessions: Nombre de sessions
+    
+    Returns:
+        Nombre moyen d'activités par session
+    """
+    if sessions == 0:
+        return 0.0
+    
+    return activities / sessions
+
+
+def detect_disengagement(
+    sessions: int,
+    activities: int,
+    time_spent: int,
+    threshold: float = 0.3
+) -> bool:
+    """
+    Détecter si l'apprenant est désengagé.
+    
+    Args:
+        sessions: Nombre de sessions
+        activities: Nombre d'activités
+        time_spent: Temps total en secondes
+        threshold: Seuil d'engagement (défaut: 0.3)
+    
+    Returns:
+        True si désengagé, False sinon
+    """
+    engagement = compute_engagement(sessions, activities, time_spent)
+    return engagement < threshold
+
+
+def compute_consistency(activity_times: list[int]) -> float:
+    """
+    Mesurer la cohérence/régularité de l'engagement.
+    
+    Utilise l'écart-type normalisé.
+    
+    Args:
+        activity_times: Liste des temps passés par activité
+    
+    Returns:
+        Score de cohérence (0.0 à 1.0)
+    """
+    if len(activity_times) < 2:
+        return 1.0
+    
+    mean_time = sum(activity_times) / len(activity_times)
+    
+    if mean_time == 0:
+        return 0.0
+    
+    # Calcul de l'écart-type
+    variance = sum((t - mean_time) ** 2 for t in activity_times) / len(activity_times)
+    std_dev = variance ** 0.5
+    
+    # Coefficient de variation normalisé
+    cv = std_dev / mean_time
+    
+    # Convertir en score (moins de variation = plus de cohérence)
+    consistency = 1.0 / (1.0 + cv)
+    
+    return min(1.0, max(0.0, consistency))
+
+
+def get_behavior_profile(
+    sessions: int,
+    activities: int,
+    time_spent: int,
+    activity_times: list[int] = None
+) -> dict:
+    """
+    Obtenir un profil comportemental complet.
+    
+    Args:
+        sessions: Nombre de sessions
+        activities: Nombre d'activités
+        time_spent: Temps total en secondes
+        activity_times: Liste optionnelle des temps par activité
+    
+    Returns:
+        Dictionnaire avec profil comportemental
+    """
+    engagement = compute_engagement(sessions, activities, time_spent)
+    activity_rate = compute_activity_rate(activities, sessions)
+    is_disengaged = detect_disengagement(sessions, activities, time_spent)
+    consistency = compute_consistency(activity_times) if activity_times else 0.5
+    
+    return {
+        "engagement_score": round(engagement, 2),
+        "engagement_label": get_engagement_label(engagement),
+        "sessions": sessions,
+        "activities": activities,
+        "total_time_spent": time_spent,
+        "average_time_per_activity": round(time_spent / activities, 2) if activities > 0 else 0,
+        "activity_rate": round(activity_rate, 2),
+        "is_disengaged": is_disengaged,
+        "consistency": round(consistency, 2),
+        "recommendations": _get_recommendations(engagement, activity_rate, consistency)
+    }
+
+
+def _get_recommendations(engagement: float, activity_rate: float, consistency: float) -> list[str]:
+    """
+    Générer des recommandations basées sur le profil comportemental.
+    
+    Args:
+        engagement: Score d'engagement
+        activity_rate: Taux d'activité par session
+        consistency: Score de cohérence
+    
+    Returns:
+        Liste de recommandations
+    """
+    recommendations = []
+    
+    if engagement < 0.3:
+        recommendations.append("L'apprenant est désengagé. Envisager une intervention pédagogique.")
+    elif engagement < 0.5:
+        recommendations.append("L'engagement est faible. Proposer des activités plus motivantes.")
+    
+    if activity_rate < 1.0:
+        recommendations.append("Le taux d'activité est faible. Encourager plus d'activités par session.")
+    
+    if consistency < 0.5:
+        recommendations.append("L'engagement est irrégulier. Établir une routine d'apprentissage.")
+    
+    if not recommendations:
+        recommendations.append("L'apprenant montre un bon engagement et une bonne cohérence.")
+    
+    return recommendations
+
+
+### FILE: ./services/affective_service.py
+
+"""Service de gestion de l'état affectif de l'apprenant."""
+from typing import Tuple
+from sqlalchemy.orm import Session
+from app.models.learner_affective import LearnerAffectiveState
+
+
+def update_affective_state(
+    motivation: float,
+    frustration: float,
+    confidence: float,
+    stress: float,
+    score: float,
+    previous_score: float = None
+) -> Tuple[float, float, float, float]:
+    """
+    Mise à jour de l'état affectif basée sur la performance.
+    
+    Args:
+        motivation: Motivation actuelle (0-1)
+        frustration: Frustration actuelle (0-1)
+        confidence: Confiance actuelle (0-1)
+        stress: Stress actuel (0-1)
+        score: Score obtenu (0-100)
+        previous_score: Score précédent (optionnel)
+    
+    Returns:
+        Tuple (motivation, frustration, confidence, stress) mis à jour
+    """
+    # Normaliser le score (0-100 → 0-1)
+    normalized_score = score / 100.0
+    
+    # Cas 1: Mauvaise performance (score < 50)
+    if score < 50:
+        # Augmenter la frustration
+        frustration = min(1.0, frustration + 0.15)
+        # Diminuer la confiance
+        confidence = max(0.0, confidence - 0.15)
+        # Augmenter le stress
+        stress = min(1.0, stress + 0.1)
+        # Diminuer la motivation
+        motivation = max(0.0, motivation - 0.1)
+    
+    # Cas 2: Performance moyenne (50-70)
+    elif score < 70:
+        frustration = max(0.0, frustration - 0.05)
+        confidence = max(0.0, confidence - 0.05)
+        stress = max(0.0, stress - 0.05)
+        motivation = min(1.0, motivation + 0.05)
+    
+    # Cas 3: Bonne performance (70-85)
+    elif score < 85:
+        motivation = min(1.0, motivation + 0.15)
+        frustration = max(0.0, frustration - 0.1)
+        confidence = min(1.0, confidence + 0.1)
+        stress = max(0.0, stress - 0.1)
+    
+    # Cas 4: Excellente performance (≥ 85)
+    else:
+        motivation = min(1.0, motivation + 0.2)
+        frustration = max(0.0, frustration - 0.15)
+        confidence = min(1.0, confidence + 0.2)
+        stress = max(0.0, stress - 0.15)
+    
+    # Ajustement basé sur la progression
+    if previous_score is not None:
+        progress = score - previous_score
+        
+        if progress > 10:  # Progression significative
+            motivation = min(1.0, motivation + 0.1)
+            confidence = min(1.0, confidence + 0.1)
+        elif progress < -10:  # Régression significative
+            frustration = min(1.0, frustration + 0.1)
+            confidence = max(0.0, confidence - 0.1)
+    
+    return (
+        round(motivation, 2),
+        round(frustration, 2),
+        round(confidence, 2),
+        round(stress, 2)
+    )
+
+
+def get_affective_label(
+    motivation: float,
+    frustration: float,
+    confidence: float,
+    stress: float
+) -> str:
+    """
+    Obtenir un label descriptif de l'état affectif global.
+    
+    Args:
+        motivation: Motivation (0-1)
+        frustration: Frustration (0-1)
+        confidence: Confiance (0-1)
+        stress: Stress (0-1)
+    
+    Returns:
+        Label descriptif
+    """
+    # Calculer un score affectif global
+    positive_score = (motivation + confidence) / 2
+    negative_score = (frustration + stress) / 2
+    
+    affective_balance = positive_score - negative_score
+    
+    if affective_balance > 0.3:
+        return "Très positif"
+    elif affective_balance > 0.1:
+        return "Positif"
+    elif affective_balance > -0.1:
+        return "Neutre"
+    elif affective_balance > -0.3:
+        return "Négatif"
+    else:
+        return "Très négatif"
+
+
+def detect_frustration(frustration: float, threshold: float = 0.7) -> bool:
+    """
+    Détecter si l'apprenant est frustré.
+    
+    Args:
+        frustration: Niveau de frustration (0-1)
+        threshold: Seuil de frustration (défaut: 0.7)
+    
+    Returns:
+        True si frustré, False sinon
+    """
+    return frustration >= threshold
+
+
+def detect_demotivation(motivation: float, threshold: float = 0.3) -> bool:
+    """
+    Détecter si l'apprenant est démotivé.
+    
+    Args:
+        motivation: Niveau de motivation (0-1)
+        threshold: Seuil de démotivation (défaut: 0.3)
+    
+    Returns:
+        True si démotivé, False sinon
+    """
+    return motivation <= threshold
+
+
+def get_feedback_type(
+    motivation: float,
+    frustration: float,
+    confidence: float,
+    stress: float
+) -> str:
+    """
+    Déterminer le type de feedback à fournir.
+    
+    Args:
+        motivation: Motivation (0-1)
+        frustration: Frustration (0-1)
+        confidence: Confiance (0-1)
+        stress: Stress (0-1)
+    
+    Returns:
+        Type de feedback: "encouragement", "aide", "challenge", "soutien"
+    """
+    is_frustrated = detect_frustration(frustration)
+    is_demotivated = detect_demotivation(motivation)
+    is_confident = confidence > 0.7
+    is_stressed = stress > 0.7
+    
+    # Apprenant frustré → feedback guidé et encourageant
+    if is_frustrated:
+        return "soutien"
+    
+    # Apprenant démotivé → feedback encourageant
+    if is_demotivated:
+        return "encouragement"
+    
+    # Apprenant confiant et non stressé → feedback challenge
+    if is_confident and not is_stressed:
+        return "challenge"
+    
+    # Apprenant stressé → feedback rassurant
+    if is_stressed:
+        return "soutien"
+    
+    # Par défaut → feedback équilibré
+    return "aide"
+
+
+def get_affective_recommendations(
+    motivation: float,
+    frustration: float,
+    confidence: float,
+    stress: float
+) -> list[str]:
+    """
+    Générer des recommandations basées sur l'état affectif.
+    
+    Args:
+        motivation: Motivation (0-1)
+        frustration: Frustration (0-1)
+        confidence: Confiance (0-1)
+        stress: Stress (0-1)
+    
+    Returns:
+        Liste de recommandations
+    """
+    recommendations = []
+    
+    # Frustration
+    if frustration > 0.7:
+        recommendations.append("L'apprenant est très frustré. Proposer une aide immédiate.")
+    elif frustration > 0.5:
+        recommendations.append("L'apprenant montre des signes de frustration. Réduire la difficulté.")
+    
+    # Motivation
+    if motivation < 0.3:
+        recommendations.append("L'apprenant est démotivé. Proposer des activités plus engageantes.")
+    elif motivation < 0.5:
+        recommendations.append("La motivation est faible. Augmenter les encouragements.")
+    
+    # Confiance
+    if confidence < 0.3:
+        recommendations.append("L'apprenant manque de confiance. Proposer des activités plus faciles.")
+    elif confidence > 0.8:
+        recommendations.append("L'apprenant est confiant. Augmenter la difficulté progressivement.")
+    
+    # Stress
+    if stress > 0.7:
+        recommendations.append("L'apprenant est très stressé. Réduire la pression et proposer du soutien.")
+    elif stress > 0.5:
+        recommendations.append("L'apprenant montre des signes de stress. Ralentir le rythme.")
+    
+    if not recommendations:
+        recommendations.append("L'apprenant semble en bon équilibre affectif. Maintenir le rythme actuel.")
+    
+    return recommendations
+
+
+def get_affective_profile(
+    motivation: float,
+    frustration: float,
+    confidence: float,
+    stress: float
+) -> dict:
+    """
+    Obtenir un profil affectif complet.
+    
+    Args:
+        motivation: Motivation (0-1)
+        frustration: Frustration (0-1)
+        confidence: Confiance (0-1)
+        stress: Stress (0-1)
+    
+    Returns:
+        Dictionnaire avec profil affectif complet
+    """
+    return {
+        "motivation": motivation,
+        "frustration": frustration,
+        "confidence": confidence,
+        "stress": stress,
+        "affective_label": get_affective_label(motivation, frustration, confidence, stress),
+        "is_frustrated": detect_frustration(frustration),
+        "is_demotivated": detect_demotivation(motivation),
+        "feedback_type": get_feedback_type(motivation, frustration, confidence, stress),
+        "recommendations": get_affective_recommendations(motivation, frustration, confidence, stress)
+    }
+
+
+### FILE: ./services/__init__.py
+
+
+
+### FILE: ./services/knowledge_update_service.py
+
+"""Service de mise à jour du modèle de connaissances."""
+
+
+def _clamp01(value: float) -> float:
+    # Utilitaire: borne une probabilité dans [0, 1].
+    # En BKT, toutes les quantités manipulées sont des probabilités.
+    return max(0.0, min(1.0, value))
+
+
+def score_to_correct(score: float, threshold: float = 50.0) -> bool:
+    # Conversion (simple) score -> réussite.
+    # Interprétation: si le score est au moins égal au seuil, on considère que l'observation est "correcte".
+    # Tu peux adapter ce seuil selon ta définition de réussite (ex: 70 pour plus strict).
+    return score >= threshold
+
+
+def bkt_update(
+    p_mastery: float,  # P(L) - Probabilité de maîtrise (probability of knowing)
+    correct: bool,  # Observation: réponse correcte ? (True/False)
+    p_transit: float,  # P(T) - Transition/Apprentissage: prob. d'apprendre entre 2 essais
+    p_guess: float,  # P(G) - Guess / Deviner: prob. de répondre juste sans maîtriser
+    p_slip: float,  # P(S) - Slip / Étourderie: prob. de répondre faux en maîtrisant
+) -> float:
+    # BKT en 2 étapes:
+    # 1) Mise à jour bayésienne P(L | obs) à partir de P(L) et de l'observation (correct/incorrect)
+    # 2) Transition d'apprentissage vers l'état suivant: P(L_next) = P(L|obs) + (1 - P(L|obs)) * P(T)
+    p_mastery = _clamp01(p_mastery)
+    p_transit = _clamp01(p_transit)
+    p_guess = _clamp01(p_guess)
+    p_slip = _clamp01(p_slip)
+
+    if correct:
+        # Observation = réponse correcte.
+        # P(Correct) = P(L)*P(Correct|L) + P(~L)*P(Correct|~L)
+        #           = P(L)*(1 - slip)     + (1 - P(L))*guess
+        denom = (p_mastery * (1.0 - p_slip)) + ((1.0 - p_mastery) * p_guess)
+        # Posterior (Bayes):
+        # P(L|Correct) = P(L)*P(Correct|L) / P(Correct)
+        p_given_obs = (p_mastery * (1.0 - p_slip)) / denom if denom else p_mastery
+    else:
+        # Observation = réponse incorrecte.
+        # P(Incorrect) = P(L)*P(Incorrect|L) + P(~L)*P(Incorrect|~L)
+        #             = P(L)*slip            + (1 - P(L))*(1 - guess)
+        denom = (p_mastery * p_slip) + ((1.0 - p_mastery) * (1.0 - p_guess))
+        # Posterior (Bayes):
+        # P(L|Incorrect) = P(L)*P(Incorrect|L) / P(Incorrect)
+        p_given_obs = (p_mastery * p_slip) / denom if denom else p_mastery
+
+    # Transition (apprentissage entre 2 tentatives):
+    # si l'apprenant ne maîtrisait pas encore, il peut apprendre avec probabilité p_transit.
+    p_next = p_given_obs + (1.0 - p_given_obs) * p_transit
+    return _clamp01(p_next)
+
+
+def update_mastery(
+    current_level: float,
+    score: float,
+    *,
+    correct: bool | None = None,  # Réponse correcte ? (si None: dérivé de score via threshold)
+    p_transit: float = 0.15,  # P(T) - Transition/Apprentissage
+    p_guess: float = 0.2,  # P(G) - Guess / Deviner
+    p_slip: float = 0.1,  # P(S) - Slip / Étourderie
+    threshold: float = 50.0,  # Seuil score->correct (ex: >=50 => correct)
+) -> float:
+    """
+    Mise à jour du niveau de maîtrise basée sur le score obtenu.
+
+    Utilise Bayesian Knowledge Tracing (BKT).
+
+    Args:
+        current_level: Niveau actuel de maîtrise (0.0 à 1.0)
+        score: Score obtenu (0 à 100)
+    Returns:
+        Nouveau niveau de maîtrise (0.0 à 1.0)
+    """
+    # Si l'appelant fournit directement correct=True/False (ex: LearningHistory.success),
+    # on l'utilise. Sinon, on le déduit du score via un seuil.
+    obs_correct = correct if correct is not None else score_to_correct(score, threshold=threshold)
+
+    # Appliquer la mise à jour BKT (Bayes + transition)
+    return bkt_update(
+        p_mastery=current_level,
+        correct=obs_correct,
+        p_transit=p_transit,
+        p_guess=p_guess,
+        p_slip=p_slip,
+    )
+
+
+def calculate_mastery_from_history(scores: list[float]) -> float:
+    """
+    Calculer le niveau de maîtrise à partir d'une liste de scores.
+
+    Utilise une moyenne pondérée où les scores récents ont plus de poids.
+
+    Args:
+        scores: Liste des scores (0 à 100)
+
+    Returns:
+        Niveau de maîtrise calculé (0.0 à 1.0)
+    """
+    if not scores:
+        return 0.2
+
+    p = 0.2
+    for s in scores:
+        p = update_mastery(p, s)
+    return p
+
+
+def get_mastery_label(mastery_level: float) -> str:
+    """
+    Obtenir un label textuel pour le niveau de maîtrise.
+
+    Args:
+        mastery_level: Niveau de maîtrise (0.0 à 1.0)
+    
+    Returns:
+        Label descriptif
+    """
+    if mastery_level < 0.2:
+        return "Non maîtrisé"
+    elif mastery_level < 0.4:
+        return "Faiblement maîtrisé"
+    elif mastery_level < 0.6:
+        return "Partiellement maîtrisé"
+    elif mastery_level < 0.8:
+        return "Bien maîtrisé"
+    else:
+        return "Excellemment maîtrisé"
+
+
+### FILE: ./services/adaptation_engine.py
+
+"""Moteur d'adaptation intelligente - Orchestration des modèles."""
+from sqlalchemy.orm import Session
+from app.models.learner_knowledge import LearnerKnowledge
+from app.models.learner_performance import LearnerPerformance
+from app.models.learner_affective import LearnerAffectiveState
+from app.models.learner_behavior import LearnerBehavior
+from app.models.concept import Concept
+from app.services.knowledge_update_service import update_mastery
+from app.services.affective_service import (
+    update_affective_state,
+    get_affective_label,
+    detect_frustration,
+    detect_demotivation
+)
+from app.services.performance_service import performance_indicator
+
+
+def process_new_performance(
+    db: Session,
+    learner_id: int,
+    concept_id: int,
+    score: float,
+    activity_type: str = "exercice",
+    time_spent: int = None
+) -> dict:
+    """
+    Orchestration globale après une nouvelle performance.
+    
+    Flux:
+    1. Enregistrer la performance
+    2. Mettre à jour le niveau de maîtrise
+    3. Mettre à jour l'état affectif
+    4. Analyser le comportement
+    5. Générer une recommandation pédagogique
+    
+    Args:
+        db: Session de base de données
+        learner_id: ID de l'apprenant
+        concept_id: ID du concept
+        score: Score obtenu (0-100)
+        activity_type: Type d'activité (quiz, exercice, test)
+        time_spent: Temps passé en secondes
+    
+    Returns:
+        Dictionnaire avec résultats de l'adaptation
+    """
+    
+    # 1️⃣ Enregistrer la performance
+    performance = LearnerPerformance(
+        learner_id=learner_id,
+        concept_id=concept_id,
+        activity_type=activity_type,
+        score=score,
+        time_spent=time_spent,
+        attempts=1
+    )
+    db.add(performance)
+    db.flush()
+    
+    # 2️⃣ Récupérer ou créer la connaissance
+    knowledge = db.query(LearnerKnowledge).filter(
+        LearnerKnowledge.learner_id == learner_id,
+        LearnerKnowledge.concept_id == concept_id
+    ).first()
+
+    concept = db.query(Concept).get(concept_id)
+    
+    previous_mastery = 0.0
+    if not knowledge:
+        knowledge = LearnerKnowledge(
+            learner_id=learner_id,
+            concept_id=concept_id,
+            mastery_level=concept.p_init if concept else 0.2
+        )
+        db.add(knowledge)
+        db.flush()
+    else:
+        previous_mastery = knowledge.mastery_level
+    
+    # 3️⃣ Mettre à jour le niveau de maîtrise
+    if concept:
+        new_mastery = update_mastery(
+            knowledge.mastery_level,
+            score,
+            p_transit=concept.p_transit,
+            p_guess=concept.p_guess,
+            p_slip=concept.p_slip,
+        )
+    else:
+        new_mastery = update_mastery(knowledge.mastery_level, score)
+    knowledge.mastery_level = new_mastery
+    
+    # 4️⃣ Récupérer ou créer l'état affectif
+    affective = db.query(LearnerAffectiveState).filter(
+        LearnerAffectiveState.learner_id == learner_id
+    ).first()
+    
+    affective_changes = {}
+    if affective:
+        old_affective = {
+            "motivation": affective.motivation,
+            "frustration": affective.frustration,
+            "confidence": affective.confidence,
+            "stress": affective.stress
+        }
+        
+        # Mettre à jour l'état affectif
+        motivation, frustration, confidence, stress = update_affective_state(
+            affective.motivation,
+            affective.frustration,
+            affective.confidence,
+            affective.stress,
+            score,
+            previous_score=None
+        )
+        
+        affective.motivation = motivation
+        affective.frustration = frustration
+        affective.confidence = confidence
+        affective.stress = stress
+        
+        affective_changes = {
+            "motivation": {"old": old_affective["motivation"], "new": motivation},
+            "frustration": {"old": old_affective["frustration"], "new": frustration},
+            "confidence": {"old": old_affective["confidence"], "new": confidence},
+            "stress": {"old": old_affective["stress"], "new": stress}
+        }
+    else:
+        # Créer un nouvel état affectif initial
+        affective = LearnerAffectiveState(learner_id=learner_id)
+        
+        # Mettre à jour basé sur le score
+        motivation, frustration, confidence, stress = update_affective_state(
+            0.5, 0.0, 0.5, 0.0, score
+        )
+        
+        affective.motivation = motivation
+        affective.frustration = frustration
+        affective.confidence = confidence
+        affective.stress = stress
+        
+        db.add(affective)
+        db.flush()
+    
+    # 5️⃣ Générer la recommandation pédagogique
+    recommendation = _pedagogical_decision(
+        new_mastery,
+        affective,
+        score
+    )
+    
+    # 6️⃣ Récupérer le concept
+    concept_name = concept.name if concept else "Unknown"
+    
+    # Commit toutes les modifications
+    db.commit()
+    
+    return {
+        "learner_id": learner_id,
+        "concept_id": concept_id,
+        "concept_name": concept_name,
+        "score": score,
+        "performance_indicator": performance_indicator(score),
+        "knowledge": {
+            "previous_mastery": round(previous_mastery, 2),
+            "new_mastery": round(new_mastery, 2),
+            "progress": round(new_mastery - previous_mastery, 2)
+        },
+        "affective": {
+            "motivation": affective.motivation,
+            "frustration": affective.frustration,
+            "confidence": affective.confidence,
+            "stress": affective.stress,
+            "label": get_affective_label(
+                affective.motivation,
+                affective.frustration,
+                affective.confidence,
+                affective.stress
+            ),
+            "changes": affective_changes
+        },
+        "recommendation": recommendation,
+        "next_action": _get_next_action(new_mastery, affective, score)
+    }
+
+
+def _pedagogical_decision(
+    mastery_level: float,
+    affective: LearnerAffectiveState,
+    score: float
+) -> str:
+    """
+    Prendre une décision pédagogique basée sur les modèles.
+    
+    Args:
+        mastery_level: Niveau de maîtrise (0-1)
+        affective: État affectif
+        score: Score obtenu (0-100)
+    
+    Returns:
+        Recommandation pédagogique
+    """
+    
+    # Cas 1: Très faible maîtrise (< 0.3)
+    if mastery_level < 0.3:
+        if affective.frustration > 0.7:
+            return "Revoir le concept avec des exemples très guidés et encourager l'apprenant"
+        return "Revoir le cours avec des exemples guidés et des exercices simples"
+    
+    # Cas 2: Maîtrise faible (0.3-0.5)
+    if mastery_level < 0.5:
+        if affective.frustration > 0.6:
+            return "Proposer une activité plus simple avec beaucoup de soutien"
+        if score < 40:
+            return "Proposer des exercices supplémentaires avec guidance progressive"
+        return "Proposer des exercices de consolidation"
+    
+    # Cas 3: Maîtrise moyenne (0.5-0.7)
+    if mastery_level < 0.7:
+        if affective.stress > 0.6:
+            return "Proposer un exercice standard avec moins de pression"
+        if score >= 70:
+            return "Proposer des exercices plus complexes pour progresser"
+        return "Continuer avec des exercices standard"
+    
+    # Cas 4: Bonne maîtrise (0.7-0.85)
+    if mastery_level < 0.85:
+        if affective.confidence > 0.8:
+            return "Proposer des exercices avancés pour consolider la maîtrise"
+        return "Proposer des exercices intermédiaires"
+    
+    # Cas 5: Excellente maîtrise (>= 0.85)
+    if affective.motivation > 0.8:
+        return "Proposer des défis avancés et des extensions du concept"
+    return "Proposer des applications pratiques du concept"
+
+
+def _get_next_action(
+    mastery_level: float,
+    affective: LearnerAffectiveState,
+    score: float
+) -> dict:
+    """
+    Déterminer l'action suivante recommandée.
+    
+    Args:
+        mastery_level: Niveau de maîtrise
+        affective: État affectif
+        score: Score obtenu
+    
+    Returns:
+        Dictionnaire avec action recommandée
+    """
+    
+    action = {
+        "type": None,
+        "priority": "normal",
+        "description": None
+    }
+    
+    # Intervention urgente si très frustré
+    if detect_frustration(affective.frustration, threshold=0.8):
+        action["type"] = "intervention"
+        action["priority"] = "urgent"
+        action["description"] = "Contacter l'apprenant pour offrir du soutien immédiat"
+        return action
+    
+    # Intervention si frustré
+    if detect_frustration(affective.frustration, threshold=0.6):
+        action["type"] = "support"
+        action["priority"] = "high"
+        action["description"] = "Proposer une session de tutorat ou une aide supplémentaire"
+        return action
+    
+    # Intervention si démotivé
+    if detect_demotivation(affective.motivation, threshold=0.3):
+        action["type"] = "motivation"
+        action["priority"] = "high"
+        action["description"] = "Proposer des activités plus engageantes et motivantes"
+        return action
+    
+    # Progression si bon apprentissage
+    if mastery_level >= 0.8 and score >= 80:
+        action["type"] = "progression"
+        action["priority"] = "normal"
+        action["description"] = "Passer au concept suivant ou proposer des extensions"
+        return action
+    
+    # Consolidation si apprentissage en cours
+    if mastery_level >= 0.5 and score >= 60:
+        action["type"] = "consolidation"
+        action["priority"] = "normal"
+        action["description"] = "Proposer des exercices de consolidation"
+        return action
+    
+    # Remédiation si difficultés
+    if mastery_level < 0.5 or score < 50:
+        action["type"] = "remediation"
+        action["priority"] = "high"
+        action["description"] = "Proposer des activités de remédiation avec guidance"
+        return action
+    
+    # Par défaut
+    action["type"] = "standard"
+    action["priority"] = "normal"
+    action["description"] = "Continuer avec les activités standard"
+    return action
+
+
+def get_adaptation_summary(
+    db: Session,
+    learner_id: int
+) -> dict:
+    """
+    Obtenir un résumé complet de l'adaptation pour un apprenant.
+    
+    Args:
+        db: Session de base de données
+        learner_id: ID de l'apprenant
+    
+    Returns:
+        Résumé de l'adaptation
+    """
+    
+    # Récupérer les modèles
+    knowledge_records = db.query(LearnerKnowledge).filter(
+        LearnerKnowledge.learner_id == learner_id
+    ).all()
+    
+    affective = db.query(LearnerAffectiveState).filter(
+        LearnerAffectiveState.learner_id == learner_id
+    ).first()
+    
+    behavior = db.query(LearnerBehavior).filter(
+        LearnerBehavior.learner_id == learner_id
+    ).first()
+    
+    performances = db.query(LearnerPerformance).filter(
+        LearnerPerformance.learner_id == learner_id
+    ).all()
+    
+    # Calculer les statistiques
+    avg_mastery = sum(k.mastery_level for k in knowledge_records) / len(knowledge_records) if knowledge_records else 0.0
+    avg_score = sum(p.score for p in performances) / len(performances) if performances else 0.0
+    
+    return {
+        "learner_id": learner_id,
+        "knowledge": {
+            "total_concepts": len(knowledge_records),
+            "average_mastery": round(avg_mastery, 2),
+            "mastered_concepts": len([k for k in knowledge_records if k.mastery_level >= 0.8])
+        },
+        "performance": {
+            "total_activities": len(performances),
+            "average_score": round(avg_score, 2)
+        },
+        "affective": {
+            "motivation": affective.motivation if affective else 0.5,
+            "frustration": affective.frustration if affective else 0.0,
+            "confidence": affective.confidence if affective else 0.5,
+            "stress": affective.stress if affective else 0.0
+        } if affective else None,
+        "behavior": {
+            "engagement_score": behavior.engagement_score if behavior else 0.0
+        } if behavior else None,
+        "overall_status": _compute_overall_status(
+            avg_mastery,
+            avg_score,
+            affective
+        )
+    }
+
+
+def _compute_overall_status(
+    avg_mastery: float,
+    avg_score: float,
+    affective: LearnerAffectiveState = None
+) -> str:
+    """
+    Calculer le statut global de l'apprenant.
+    
+    Args:
+        avg_mastery: Maîtrise moyenne
+        avg_score: Score moyen
+        affective: État affectif
+    
+    Returns:
+        Statut global
+    """
+    
+    if avg_mastery >= 0.8 and avg_score >= 80:
+        if affective and affective.motivation > 0.7:
+            return "Excellent - Apprenant très performant et motivé"
+        return "Excellent - Apprenant très performant"
+    
+    if avg_mastery >= 0.6 and avg_score >= 70:
+        if affective and affective.frustration > 0.6:
+            return "Bon - Apprenant performant mais frustré"
+        return "Bon - Apprenant performant"
+    
+    if avg_mastery >= 0.4 and avg_score >= 50:
+        if affective and affective.motivation < 0.3:
+            return "Moyen - Apprenant en apprentissage mais démotivé"
+        return "Moyen - Apprenant en apprentissage"
+    
+    if affective and affective.frustration > 0.7:
+        return "Faible - Apprenant en difficulté et très frustré"
+    
+    return "Faible - Apprenant en difficulté"
+
+
+### FILE: ./services/learner_service.py
+
+"""Service métier pour les apprenants."""
+from sqlalchemy.orm import Session
+from app.models.learner import Learner
+from app.schemas.learner import LearnerCreate, LearnerUpdate
+
+
+class LearnerService:
+    """Service pour gérer les apprenants."""
+    
+    @staticmethod
+    def create_learner(db: Session, learner: LearnerCreate) -> Learner:
+        """Créer un nouvel apprenant."""
+        db_learner = Learner(**learner.dict())
+        db.add(db_learner)
+        db.commit()
+        db.refresh(db_learner)
+        return db_learner
+    
+    @staticmethod
+    def get_learner(db: Session, learner_id: int) -> Learner:
+        """Récupérer un apprenant par ID."""
+        return db.query(Learner).filter(Learner.id == learner_id).first()
+    
+    @staticmethod
+    def get_learners(db: Session, skip: int = 0, limit: int = 10) -> list[Learner]:
+        """Récupérer la liste des apprenants."""
+        return db.query(Learner).offset(skip).limit(limit).all()
+    
+    @staticmethod
+    def update_learner(db: Session, learner_id: int, learner_update: LearnerUpdate) -> Learner:
+        """Mettre à jour un apprenant."""
+        db_learner = db.query(Learner).filter(Learner.id == learner_id).first()
+        if db_learner:
+            update_data = learner_update.dict(exclude_unset=True)
+            for field, value in update_data.items():
+                setattr(db_learner, field, value)
+            db.commit()
+            db.refresh(db_learner)
+        return db_learner
+    
+    @staticmethod
+    def delete_learner(db: Session, learner_id: int) -> bool:
+        """Supprimer un apprenant."""
+        db_learner = db.query(Learner).filter(Learner.id == learner_id).first()
+        if db_learner:
+            db.delete(db_learner)
+            db.commit()
+            return True
+        return False
+
+
+### FILE: ./services/update_engine.py
+
+"""Moteur de mise à jour pour les apprenants (IA / règles)."""
+from sqlalchemy.orm import Session
+from app.models.learner import Learner
+from app.models.performance import Performance
+
+
+class UpdateEngine:
+    """Moteur pour mettre à jour les profils d'apprenants basé sur les performances et états affectifs."""
+    
+    @staticmethod
+    def update_learner_progress(db: Session, learner_id: int) -> float:
+        """Calculer et mettre à jour la progression d'un apprenant."""
+        performances = db.query(Performance).filter(
+            Performance.learner_id == learner_id
+        ).all()
+        
+        if not performances:
+            return 0.0
+        
+        total_score = sum(p.score for p in performances)
+        average_score = total_score / len(performances)
+        
+        learner = db.query(Learner).filter(Learner.id == learner_id).first()
+        if learner:
+            learner.progress = average_score
+            db.commit()
+        
+        return average_score
+    
+    @staticmethod
+    def adjust_difficulty(db: Session, learner_id: int) -> str:
+        """Ajuster le niveau de difficulté basé sur les performances."""
+        learner = db.query(Learner).filter(Learner.id == learner_id).first()
+        if not learner:
+            return "beginner"
+        
+        progress = UpdateEngine.update_learner_progress(db, learner_id)
+        
+        if progress >= 0.8:
+            new_level = "advanced"
+        elif progress >= 0.6:
+            new_level = "intermediate"
+        else:
+            new_level = "beginner"
+        
+        learner.level = new_level
+        db.commit()
+        
+        return new_level
+
+
+### FILE: ./services/knowledge_inference_service.py
+
+"""Service d'inférence et de mise à jour automatique des connaissances."""
+from sqlalchemy.orm import Session
+from app.models.learner_knowledge import LearnerKnowledge
+from app.models.learning_history import LearningHistory
+from app.models.concept import Concept
+from app.services.knowledge_update_service import update_mastery
+
+
+def infer_knowledge_from_activity(
+    db: Session,
+    learner_id: int,
+    concept_id: int,
+    score: float
+) -> LearnerKnowledge:
+    """
+    Mettre à jour le niveau de maîtrise d'un concept basé sur une activité.
+    
+    Args:
+        db: Session de base de données
+        learner_id: ID de l'apprenant
+        concept_id: ID du concept
+        score: Score obtenu (0-100)
+    
+    Returns:
+        LearnerKnowledge mis à jour
+    """
+    concept = db.query(Concept).get(concept_id)
+
+    # Récupérer ou créer l'enregistrement de connaissances
+    lk = db.query(LearnerKnowledge).filter(
+        LearnerKnowledge.learner_id == learner_id,
+        LearnerKnowledge.concept_id == concept_id
+    ).first()
+    if not lk:
+        lk = LearnerKnowledge(
+            learner_id=learner_id,
+            concept_id=concept_id,
+            mastery_level=concept.p_init if concept else 0.2
+        )
+        db.add(lk)
+     
+    # Mettre à jour le niveau de maîtrise
+    if concept:
+        lk.mastery_level = update_mastery(
+            lk.mastery_level,
+            score,
+            p_transit=concept.p_transit,
+            p_guess=concept.p_guess,
+            p_slip=concept.p_slip,
+        )
+    else:
+        lk.mastery_level = update_mastery(lk.mastery_level, score)
+    
+    db.commit()
+    db.refresh(lk)
+    
+    return lk
+
+
+def infer_knowledge_from_history(
+    db: Session,
+    learner_id: int,
+    concept_id: int
+) -> LearnerKnowledge:
+    """
+    Inférer le niveau de maîtrise à partir de l'historique d'apprentissage.
+    
+    Calcule une moyenne pondérée des scores pour ce concept.
+    
+    Args:
+        db: Session de base de données
+        learner_id: ID de l'apprenant
+        concept_id: ID du concept
+    
+    Returns:
+        LearnerKnowledge mis à jour
+    """
+    concept = db.query(Concept).get(concept_id)
+
+    # Récupérer tous les historiques avec scores pour ce concept
+    histories = db.query(LearningHistory).filter(
+        LearningHistory.learner_id == learner_id,
+        LearningHistory.activity_ref.like(f"%{concept_id}%"),
+        LearningHistory.score.isnot(None),
+    ).order_by(LearningHistory.created_at.asc()).all()
+    if not histories:
+        return None
+
+    mastery_level = concept.p_init if concept else 0.2
+    for h in histories:
+        if concept:
+            mastery_level = update_mastery(
+                mastery_level,
+                h.score,
+                correct=h.success,
+                p_transit=concept.p_transit,
+                p_guess=concept.p_guess,
+                p_slip=concept.p_slip,
+            )
+        else:
+            mastery_level = update_mastery(mastery_level, h.score, correct=h.success)
+    
+    # Récupérer ou créer l'enregistrement
+    lk = db.query(LearnerKnowledge).filter(
+        LearnerKnowledge.learner_id == learner_id,
+        LearnerKnowledge.concept_id == concept_id
+    ).first()
+    if not lk:
+        lk = LearnerKnowledge(
+            learner_id=learner_id,
+            concept_id=concept_id,
+            mastery_level=mastery_level
+        )
+        db.add(lk)
+    else:
+        lk.mastery_level = mastery_level
+    
+    db.commit()
+    db.refresh(lk)
+    
+    return lk
+
+
+def get_learner_knowledge_summary(
+    db: Session,
+    learner_id: int
+) -> dict:
+    """
+    Obtenir un résumé des connaissances d'un  apprenant.
+    
+    Args:
+        db: Session de base de données
+        learner_id: ID de l'apprenant
+    
+    Returns:
+        Dictionnaire avec statistiques de connaissances
+    """
+    knowledge_records = db.query(LearnerKnowledge).filter(
+        LearnerKnowledge.learner_id == learner_id
+    ).all()
+    
+    if not knowledge_records:
+        return {
+            "learner_id": learner_id,
+            "total_concepts": 0,
+            "average_mastery": 0.0,
+            "mastered_concepts": 0,
+            "concepts": []
+        }
+    
+    total_mastery = sum(k.mastery_level for k in knowledge_records)
+    average_mastery = total_mastery / len(knowledge_records)
+    mastered = sum(1 for k in knowledge_records if k.mastery_level >= 0.8)
+    
+    return {
+        "learner_id": learner_id,
+        "total_concepts": len(knowledge_records),
+        "average_mastery": round(average_mastery, 2),
+        "mastered_concepts": mastered,
+        "concepts": [
+            {
+                "concept_id": k.concept_id,
+                "concept_name": k.concept.name if k.concept else "Unknown",
+                "mastery_level": round(k.mastery_level, 2)
+            }
+            for k in knowledge_records
+        ]
+    }
+
+
+### FILE: ./utils/__init__.py
+
+
+
+### FILE: ./utils/metrics.py
+
+"""Fonctions utilitaires pour les métriques."""
+from typing import List
+
+
+def calculate_average_score(scores: List[float]) -> float:
+    """Calculer la moyenne des scores."""
+    if not scores:
+        return 0.0
+    return sum(scores) / len(scores)
+
+
+def calculate_success_rate(attempts: int, successes: int) -> float:
+    """Calculer le taux de réussite."""
+    if attempts == 0:
+        return 0.0
+    return (successes / attempts) * 100
+
+
+def normalize_score(score: float, min_val: float = 0.0, max_val: float = 100.0) -> float:
+    """Normaliser un score entre 0 et 1."""
+    if max_val == min_val:
+        return 0.0
+    return (score - min_val) / (max_val - min_val)
+
+
+def calculate_engagement_level(interaction_count: int, time_spent: float) -> float:
+    """Calculer le niveau d'engagement basé sur les interactions et le temps."""
+    # Formule simple : engagement = (interactions * 0.6) + (time_spent * 0.4)
+    # Normalisé entre 0 et 1
+    engagement = (interaction_count * 0.6) + (time_spent * 0.4)
+    return min(1.0, max(0.0, engagement))

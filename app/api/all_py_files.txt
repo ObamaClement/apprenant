@@ -1,0 +1,3340 @@
+
+
+### FILE: ./learner_competency_mastery.py
+
+"""Routes FastAPI pour la maîtrise des compétences (BKT)."""
+from fastapi import APIRouter, Depends, HTTPException, Query
+from sqlalchemy.orm import Session
+from typing import Optional
+from app.core.deps import get_db
+from app.models.learner_competency_mastery import LearnerCompetencyMastery
+from app.models.learner import Learner
+from app.models.competence_clinique import CompetenceClinique
+from app.schemas.learner_competency import (
+    LearnerCompetencyMasteryCreate,
+    LearnerCompetencyMasteryResponse,
+    LearnerCompetencyMasteryUpdate,
+    LearnerCompetencyMasteryWithCompetence
+)
+from app.services.knowledge_inference_service import (
+    infer_knowledge_from_interaction,
+    get_learner_knowledge_summary,
+    identify_weak_competences
+)
+from app.services.knowledge_update_service import (
+    get_mastery_label,
+    calculate_confidence
+)
+
+router = APIRouter(prefix="/mastery", tags=["Competency Mastery"])
+
+
+@router.post("/", response_model=LearnerCompetencyMasteryResponse, status_code=201)
+def create_or_update_mastery(
+    data: LearnerCompetencyMasteryCreate,
+    db: Session = Depends(get_db)
+):
+    """Créer ou mettre à jour la maîtrise d'une compétence."""
+    # Vérifications
+    learner = db.query(Learner).filter(Learner.id == data.learner_id).first()
+    if not learner:
+        raise HTTPException(status_code=404, detail="Apprenant non trouvé")
+    
+    competence = db.query(CompetenceClinique).filter(
+        CompetenceClinique.id == data.competence_id
+    ).first()
+    if not competence:
+        raise HTTPException(status_code=404, detail="Compétence non trouvée")
+    
+    # Vérifier si existe déjà
+    existing = db.query(LearnerCompetencyMastery).filter(
+        LearnerCompetencyMastery.learner_id == data.learner_id,
+        LearnerCompetencyMastery.competence_id == data.competence_id
+    ).first()
+    
+    if existing:
+        # Mettre à jour
+        existing.mastery_level = data.mastery_level
+        existing.confidence = data.confidence
+        db.commit()
+        db.refresh(existing)
+        return existing
+    else:
+        # Créer
+        mastery = LearnerCompetencyMastery(**data.model_dump())
+        db.add(mastery)
+        db.commit()
+        db.refresh(mastery)
+        return mastery
+
+
+@router.get("/learner/{learner_id}", response_model=list[LearnerCompetencyMasteryWithCompetence])
+def get_learner_masteries(
+    learner_id: int,
+    db: Session = Depends(get_db)
+):
+    """Récupérer toutes les maîtrises d'un apprenant."""
+    learner = db.query(Learner).filter(Learner.id == learner_id).first()
+    if not learner:
+        raise HTTPException(status_code=404, detail="Apprenant non trouvé")
+    
+    masteries = db.query(LearnerCompetencyMastery).filter(
+        LearnerCompetencyMastery.learner_id == learner_id
+    ).all()
+    
+    # Enrichir avec info de compétence
+    enriched = []
+    for m in masteries:
+        comp = db.query(CompetenceClinique).filter(
+            CompetenceClinique.id == m.competence_id
+        ).first()
+        
+        enriched.append({
+            **m.__dict__,
+            "competence_code": comp.code_competence if comp else None,
+            "competence_nom": comp.nom if comp else None,
+            "competence_categorie": comp.categorie if comp else None
+        })
+    
+    return enriched
+
+
+@router.get("/{learner_id}/{competence_id}", response_model=LearnerCompetencyMasteryResponse)
+def get_mastery(
+    learner_id: int,
+    competence_id: int,
+    db: Session = Depends(get_db)
+):
+    """Récupérer la maîtrise d'une compétence spécifique."""
+    mastery = db.query(LearnerCompetencyMastery).filter(
+        LearnerCompetencyMastery.learner_id == learner_id,
+        LearnerCompetencyMastery.competence_id == competence_id
+    ).first()
+    
+    if not mastery:
+        raise HTTPException(status_code=404, detail="Maîtrise non trouvée")
+    
+    return mastery
+
+
+@router.get("/summary/{learner_id}")
+def get_knowledge_summary(
+    learner_id: int,
+    db: Session = Depends(get_db)
+):
+    """Obtenir un résumé complet des connaissances."""
+    learner = db.query(Learner).filter(Learner.id == learner_id).first()
+    if not learner:
+        raise HTTPException(status_code=404, detail="Apprenant non trouvé")
+    
+    return get_learner_knowledge_summary(db, learner_id)
+
+
+@router.get("/weak/{learner_id}")
+def get_weak_competences(
+    learner_id: int,
+    threshold: float = Query(0.5, ge=0.0, le=1.0),
+    db: Session = Depends(get_db)
+):
+    """Identifier les compétences faibles."""
+    learner = db.query(Learner).filter(Learner.id == learner_id).first()
+    if not learner:
+        raise HTTPException(status_code=404, detail="Apprenant non trouvé")
+    
+    weak_comps = identify_weak_competences(db, learner_id, threshold)
+    
+    return {
+        "learner_id": learner_id,
+        "threshold": threshold,
+        "weak_competences_count": len(weak_comps),
+        "weak_competences": weak_comps
+    }
+
+
+@router.post("/update-from-score")
+def update_from_score(
+    learner_id: int = Query(...),
+    competence_id: int = Query(...),
+    score: float = Query(..., ge=0.0, le=100.0),
+    correct: Optional[bool] = None,
+    db: Session = Depends(get_db)
+):
+    """Mettre à jour la maîtrise basée sur un score (BKT)."""
+    learner = db.query(Learner).filter(Learner.id == learner_id).first()
+    if not learner:
+        raise HTTPException(status_code=404, detail="Apprenant non trouvé")
+    
+    competence = db.query(CompetenceClinique).filter(
+        CompetenceClinique.id == competence_id
+    ).first()
+    if not competence:
+        raise HTTPException(status_code=404, detail="Compétence non trouvée")
+    
+    mastery = infer_knowledge_from_interaction(db, learner_id, competence_id, score, correct)
+    
+    return {
+        "learner_id": learner_id,
+        "competence_id": competence_id,
+        "competence_code": competence.code_competence,
+        "score": score,
+        "new_mastery_level": round(mastery.mastery_level or 0, 2),
+        "confidence": round(mastery.confidence or 0, 2),
+        "mastery_label": get_mastery_label(mastery.mastery_level or 0),
+        "message": "Maîtrise mise à jour via BKT"
+    }
+
+
+@router.put("/{learner_id}/{competence_id}", response_model=LearnerCompetencyMasteryResponse)
+def update_mastery(
+    learner_id: int,
+    competence_id: int,
+    mastery_update: LearnerCompetencyMasteryUpdate,
+    db: Session = Depends(get_db)
+):
+    """Mettre à jour une maîtrise."""
+    mastery = db.query(LearnerCompetencyMastery).filter(
+        LearnerCompetencyMastery.learner_id == learner_id,
+        LearnerCompetencyMastery.competence_id == competence_id
+    ).first()
+    
+    if not mastery:
+        raise HTTPException(status_code=404, detail="Maîtrise non trouvée")
+    
+    update_dict = mastery_update.model_dump(exclude_unset=True)
+    for field, value in update_dict.items():
+        setattr(mastery, field, value)
+    
+    db.commit()
+    db.refresh(mastery)
+    return mastery
+
+
+@router.delete("/{learner_id}/{competence_id}", status_code=204)
+def delete_mastery(
+    learner_id: int,
+    competence_id: int,
+    db: Session = Depends(get_db)
+):
+    """Supprimer un enregistrement de maîtrise."""
+    mastery = db.query(LearnerCompetencyMastery).filter(
+        LearnerCompetencyMastery.learner_id == learner_id,
+        LearnerCompetencyMastery.competence_id == competence_id
+    ).first()
+    
+    if not mastery:
+        raise HTTPException(status_code=404, detail="Maîtrise non trouvée")
+    
+    db.delete(mastery)
+    db.commit()
+    return None
+
+### FILE: ./learner_affective.py
+
+"""Routes FastAPI pour l'état affectif de l'apprenant."""
+from fastapi import APIRouter, Depends, HTTPException
+from sqlalchemy.orm import Session
+from app.models.learner_affective import LearnerAffectiveState
+from app.models.learner import Learner
+from app.schemas.learner_affective import (
+    LearnerAffectiveCreate,
+    LearnerAffectiveResponse
+)
+from app.core.deps import get_db
+from app.services.affective_service import (
+    update_affective_state,
+    get_affective_profile,
+    get_feedback_type
+)
+
+router = APIRouter(prefix="/affective", tags=["Learner Affective"])
+
+
+@router.post("/", response_model=LearnerAffectiveResponse)
+def create_or_update_affective(
+    data: LearnerAffectiveCreate,
+    db: Session = Depends(get_db)
+):
+    """Créer ou mettre à jour l'état affectif d'un apprenant."""
+    learner = db.query(Learner).get(data.learner_id)
+    if not learner:
+        raise HTTPException(status_code=404, detail="Apprenant non trouvé")
+    
+    # Vérifier si un enregistrement existe déjà
+    existing = db.query(LearnerAffectiveState).filter(
+        LearnerAffectiveState.learner_id == data.learner_id
+    ).first()
+    
+    if existing:
+        # Mettre à jour
+        existing.motivation = data.motivation
+        existing.frustration = data.frustration
+        existing.confidence = data.confidence
+        existing.stress = data.stress
+        db.commit()
+        db.refresh(existing)
+        return existing
+    else:
+        # Créer
+        affective = LearnerAffectiveState(**data.dict())
+        db.add(affective)
+        db.commit()
+        db.refresh(affective)
+        return affective
+
+
+@router.get("/{learner_id}", response_model=LearnerAffectiveResponse)
+def get_affective_state(
+    learner_id: int,
+    db: Session = Depends(get_db)
+):
+    """Récupérer l'état affectif d'un apprenant."""
+    learner = db.query(Learner).get(learner_id)
+    if not learner:
+        raise HTTPException(status_code=404, detail="Apprenant non trouvé")
+    
+    affective = db.query(LearnerAffectiveState).filter(
+        LearnerAffectiveState.learner_id == learner_id
+    ).first()
+    
+    if not affective:
+        raise HTTPException(status_code=404, detail="État affectif non trouvé")
+    
+    return affective
+
+
+@router.post("/update-from-score/{learner_id}/{score}")
+def update_from_score(
+    learner_id: int,
+    score: float,
+    db: Session = Depends(get_db)
+):
+    """Mettre à jour l'état affectif basé sur un score de performance."""
+    learner = db.query(Learner).get(learner_id)
+    if not learner:
+        raise HTTPException(status_code=404, detail="Apprenant non trouvé")
+    
+    if not 0 <= score <= 100:
+        raise HTTPException(status_code=400, detail="Le score doit être entre 0 et 100")
+    
+    affective = db.query(LearnerAffectiveState).filter(
+        LearnerAffectiveState.learner_id == learner_id
+    ).first()
+    
+    if not affective:
+        # Créer un nouvel enregistrement avec état initial
+        affective = LearnerAffectiveState(learner_id=learner_id)
+        db.add(affective)
+        db.commit()
+        db.refresh(affective)
+    
+    # Mettre à jour l'état affectif
+    motivation, frustration, confidence, stress = update_affective_state(
+        affective.motivation,
+        affective.frustration,
+        affective.confidence,
+        affective.stress,
+        score
+    )
+    
+    affective.motivation = motivation
+    affective.frustration = frustration
+    affective.confidence = confidence
+    affective.stress = stress
+    
+    db.commit()
+    db.refresh(affective)
+    
+    return {
+        "learner_id": learner_id,
+        "score": score,
+        "motivation": motivation,
+        "frustration": frustration,
+        "confidence": confidence,
+        "stress": stress,
+        "message": "État affectif mis à jour"
+    }
+
+
+@router.get("/profile/{learner_id}")
+def get_affective_profile_endpoint(
+    learner_id: int,
+    db: Session = Depends(get_db)
+):
+    """Obtenir un profil affectif détaillé."""
+    learner = db.query(Learner).get(learner_id)
+    if not learner:
+        raise HTTPException(status_code=404, detail="Apprenant non trouvé")
+    
+    affective = db.query(LearnerAffectiveState).filter(
+        LearnerAffectiveState.learner_id == learner_id
+    ).first()
+    
+    if not affective:
+        raise HTTPException(status_code=404, detail="État affectif non trouvé")
+    
+    profile = get_affective_profile(
+        affective.motivation,
+        affective.frustration,
+        affective.confidence,
+        affective.stress
+    )
+    
+    return profile
+
+
+@router.get("/feedback-type/{learner_id}")
+def get_feedback_type_endpoint(
+    learner_id: int,
+    db: Session = Depends(get_db)
+):
+    """Obtenir le type de feedback recommandé."""
+    learner = db.query(Learner).get(learner_id)
+    if not learner:
+        raise HTTPException(status_code=404, detail="Apprenant non trouvé")
+    
+    affective = db.query(LearnerAffectiveState).filter(
+        LearnerAffectiveState.learner_id == learner_id
+    ).first()
+    
+    if not affective:
+        raise HTTPException(status_code=404, detail="État affectif non trouvé")
+    
+    feedback_type = get_feedback_type(
+        affective.motivation,
+        affective.frustration,
+        affective.confidence,
+        affective.stress
+    )
+    
+    return {
+        "learner_id": learner_id,
+        "feedback_type": feedback_type,
+        "description": _get_feedback_description(feedback_type)
+    }
+
+
+def _get_feedback_description(feedback_type: str) -> str:
+    """Obtenir une description du type de feedback."""
+    descriptions = {
+        "encouragement": "Fournir des encouragements et renforcer la motivation",
+        "aide": "Fournir une aide équilibrée avec guidance",
+        "challenge": "Proposer des défis plus complexes",
+        "soutien": "Fournir un soutien émotionnel et pédagogique"
+    }
+    return descriptions.get(feedback_type, "Type de feedback inconnu")
+
+
+### FILE: ./symptomes.py
+
+
+
+### FILE: ./concepts.py
+
+
+
+### FILE: ./knowledge_inference.py
+
+from fastapi import APIRouter, Depends, HTTPException, Query, Body
+from sqlalchemy.orm import Session
+from typing import Dict, Optional
+from uuid import UUID
+from app.core.deps import get_db
+from app.models.learner import Learner
+from app.models.competence_clinique import CompetenceClinique
+from app.models.simulation_session import SimulationSession
+from app.services.knowledge_inference_service import (
+    infer_knowledge_from_interaction,
+    infer_knowledge_from_session,
+    get_learner_knowledge_summary,
+    identify_weak_competences
+)
+from app.services.knowledge_update_service import (
+    update_mastery,
+    calculate_mastery_from_history,
+    get_mastery_label
+)
+
+router = APIRouter(prefix="/knowledge", tags=["Knowledge Inference"])
+
+
+@router.post("/infer-from-interaction")
+def infer_from_interaction(
+    learner_id: int = Body(...),
+    competence_id: int = Body(...),
+    score: float = Body(..., ge=0.0, le=100.0),
+    correct: Optional[bool] = Body(None),
+    db: Session = Depends(get_db)
+):
+    """Inférer la maîtrise depuis une interaction unique (BKT)."""
+    learner = db.query(Learner).filter(Learner.id == learner_id).first()
+    if not learner:
+        raise HTTPException(status_code=404, detail="Apprenant non trouvé")
+    
+    competence = db.query(CompetenceClinique).filter(
+        CompetenceClinique.id == competence_id
+    ).first()
+    if not competence:
+        raise HTTPException(status_code=404, detail="Compétence non trouvée")
+    
+    mastery = infer_knowledge_from_interaction(
+        db, learner_id, competence_id, score, correct
+    )
+    
+    return {
+        "learner_id": learner_id,
+        "competence_id": competence_id,
+        "competence_code": competence.code_competence,
+        "score": score,
+        "mastery_level": round(mastery.mastery_level or 0, 2),
+        "confidence": round(mastery.confidence or 0, 2),
+        "mastery_label": get_mastery_label(mastery.mastery_level or 0),
+        "nb_success": mastery.nb_success,
+        "nb_failures": mastery.nb_failures,
+        "message": "Maîtrise inférée avec succès"
+    }
+
+
+@router.post("/infer-from-session")
+def infer_from_session(
+    session_id: UUID = Body(...),
+    competence_scores: Dict[int, float] = Body(...),
+    db: Session = Depends(get_db)
+):
+    """Inférer les maîtrises depuis une session complète (BKT)."""
+    session = db.query(SimulationSession).filter(
+        SimulationSession.id == session_id
+    ).first()
+    if not session:
+        raise HTTPException(status_code=404, detail="Session non trouvée")
+    
+    masteries = infer_knowledge_from_session(db, session_id, competence_scores)
+    
+    results = []
+    for m in masteries:
+        comp = db.query(CompetenceClinique).filter(
+            CompetenceClinique.id == m.competence_id
+        ).first()
+        
+        results.append({
+            "competence_id": m.competence_id,
+            "competence_code": comp.code_competence if comp else None,
+            "mastery_level": round(m.mastery_level or 0, 2),
+            "confidence": round(m.confidence or 0, 2),
+            "mastery_label": get_mastery_label(m.mastery_level or 0)
+        })
+    
+    return {
+        "session_id": str(session_id),
+        "learner_id": session.learner_id,
+        "competences_updated": len(results),
+        "masteries": results
+    }
+
+
+@router.get("/summary/{learner_id}")
+def get_summary(
+    learner_id: int,
+    db: Session = Depends(get_db)
+):
+    """Obtenir un résumé complet des connaissances."""
+    learner = db.query(Learner).filter(Learner.id == learner_id).first()
+    if not learner:
+        raise HTTPException(status_code=404, detail="Apprenant non trouvé")
+    
+    return get_learner_knowledge_summary(db, learner_id)
+
+
+@router.get("/weak/{learner_id}")
+def get_weak(
+    learner_id: int,
+    threshold: float = Query(0.5, ge=0.0, le=1.0),
+    db: Session = Depends(get_db)
+):
+    """Identifier les compétences faibles."""
+    learner = db.query(Learner).filter(Learner.id == learner_id).first()
+    if not learner:
+        raise HTTPException(status_code=404, detail="Apprenant non trouvé")
+    
+    weak = identify_weak_competences(db, learner_id, threshold)
+    
+    return {
+        "learner_id": learner_id,
+        "threshold": threshold,
+        "weak_competences_count": len(weak),
+        "weak_competences": weak
+    }
+
+
+@router.post("/batch-update")
+def batch_update(
+    updates: list[Dict] = Body(...),
+    db: Session = Depends(get_db)
+):
+    """
+    Mettre à jour plusieurs maîtrises en batch.
+    
+    Format: [
+        {"learner_id": int, "competence_id": int, "score": float},
+        ...
+    ]
+    """
+    results = []
+    
+    for update in updates:
+        try:
+            learner_id = update.get("learner_id")
+            competence_id = update.get("competence_id")
+            score = update.get("score")
+            
+            if not all([learner_id, competence_id, score is not None]):
+                results.append({
+                    "status": "error",
+                    "message": "Données manquantes"
+                })
+                continue
+            
+            mastery = infer_knowledge_from_interaction(
+                db, learner_id, competence_id, score
+            )
+            
+            results.append({
+                "status": "success",
+                "learner_id": learner_id,
+                "competence_id": competence_id,
+                "mastery_level": round(mastery.mastery_level or 0, 2)
+            })
+        
+        except Exception as e:
+            results.append({
+                "status": "error",
+                "message": str(e)
+            })
+    
+    return {
+        "total": len(updates),
+        "successful": len([r for r in results if r.get("status") == "success"]),
+        "failed": len([r for r in results if r.get("status") == "error"]),
+        "results": results
+    }
+
+
+@router.post("/calculate-from-history")
+def calculate_from_history(
+    scores: list[float] = Body(...),
+    db: Session = Depends(get_db)
+):
+    """Calculer le niveau de maîtrise à partir d'un historique de scores."""
+    if not scores:
+        raise HTTPException(status_code=400, detail="Liste de scores vide")
+    
+    # Valider les scores
+    for score in scores:
+        if not 0 <= score <= 100:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Score invalide: {score}. Doit être entre 0 et 100."
+            )
+    
+    mastery_level = calculate_mastery_from_history(scores)
+    
+    return {
+        "scores_count": len(scores),
+        "scores": scores,
+        "mastery_level": round(mastery_level, 2),
+        "mastery_label": get_mastery_label(mastery_level),
+        "message": "Maîtrise calculée depuis l'historique"
+    }
+
+
+
+### FILE: ./pathologies.py
+
+### FICHIER 11: app/api/routes/pathologies.py
+"""Routes FastAPI pour les pathologies."""
+from fastapi import APIRouter, Depends, HTTPException, Query
+from sqlalchemy.orm import Session
+from typing import Optional
+from app.core.deps import get_db
+from app.models.pathologie import Pathologie
+from app.schemas.pathologie import (
+    PathologieCreate,
+    PathologieResponse,
+    PathologieUpdate,
+    PathologieListResponse
+)
+from app.services.pathologie_service import (
+    get_all_pathologies,
+    get_pathologie_by_id,
+    get_pathologie_by_icd10,
+    search_pathologies,
+    get_pathologies_by_gravite
+)
+
+router = APIRouter(prefix="/pathologies", tags=["Pathologies"])
+
+
+@router.post("/", response_model=PathologieResponse, status_code=201)
+def create_pathologie(
+    pathologie: PathologieCreate,
+    db: Session = Depends(get_db)
+):
+    """Créer une nouvelle pathologie."""
+    # Vérifier unicité du code ICD10 si fourni
+    if pathologie.code_icd10:
+        existing = db.query(Pathologie).filter(
+            Pathologie.code_icd10 == pathologie.code_icd10
+        ).first()
+        if existing:
+            raise HTTPException(status_code=400, detail="Code ICD10 déjà existant")
+    
+    new_path = Pathologie(**pathologie.model_dump())
+    db.add(new_path)
+    db.commit()
+    db.refresh(new_path)
+    return new_path
+
+
+@router.get("/", response_model=list[PathologieListResponse])
+def list_pathologies(
+    skip: int = Query(0, ge=0),
+    limit: int = Query(100, ge=1, le=200),
+    categorie: Optional[str] = None,
+    db: Session = Depends(get_db)
+):
+    """Récupérer la liste des pathologies."""
+    return get_all_pathologies(db, skip, limit, categorie)
+
+
+@router.get("/{pathologie_id}", response_model=PathologieResponse)
+def get_pathologie(
+    pathologie_id: int,
+    db: Session = Depends(get_db)
+):
+    """Récupérer une pathologie par ID."""
+    path = get_pathologie_by_id(db, pathologie_id)
+    if not path:
+        raise HTTPException(status_code=404, detail="Pathologie non trouvée")
+    return path
+
+
+@router.get("/icd10/{code_icd10}", response_model=PathologieResponse)
+def get_pathologie_by_icd10_endpoint(
+    code_icd10: str,
+    db: Session = Depends(get_db)
+):
+    """Récupérer une pathologie par code ICD10."""
+    path = get_pathologie_by_icd10(db, code_icd10)
+    if not path:
+        raise HTTPException(status_code=404, detail="Pathologie non trouvée")
+    return path
+
+
+@router.get("/search/", response_model=list[PathologieListResponse])
+def search_pathologies_endpoint(
+    q: str = Query(..., min_length=2),
+    limit: int = Query(20, ge=1, le=100),
+    db: Session = Depends(get_db)
+):
+    """Rechercher des pathologies par nom."""
+    return search_pathologies(db, q, limit)
+
+
+@router.get("/gravite/{niveau_min}", response_model=list[PathologieListResponse])
+def get_by_gravite(
+    niveau_min: int = Query(..., ge=1, le=5),
+    niveau_max: int = Query(5, ge=1, le=5),
+    db: Session = Depends(get_db)
+):
+    """Récupérer les pathologies par niveau de gravité."""
+    if niveau_min > niveau_max:
+        raise HTTPException(
+            status_code=400,
+            detail="niveau_min doit être <= niveau_max"
+        )
+    
+    return get_pathologies_by_gravite(db, niveau_min, niveau_max)
+
+
+@router.get("/categorie/{categorie}", response_model=list[PathologieListResponse])
+def get_by_categorie(
+    categorie: str,
+    skip: int = Query(0, ge=0),
+    limit: int = Query(100, ge=1, le=200),
+    db: Session = Depends(get_db)
+):
+    """Récupérer les pathologies d'une catégorie."""
+    return get_all_pathologies(db, skip, limit, categorie)
+
+
+@router.put("/{pathologie_id}", response_model=PathologieResponse)
+def update_pathologie(
+    pathologie_id: int,
+    pathologie_update: PathologieUpdate,
+    db: Session = Depends(get_db)
+):
+    """Mettre à jour une pathologie."""
+    path = get_pathologie_by_id(db, pathologie_id)
+    if not path:
+        raise HTTPException(status_code=404, detail="Pathologie non trouvée")
+    
+    update_dict = pathologie_update.model_dump(exclude_unset=True)
+    for field, value in update_dict.items():
+        setattr(path, field, value)
+    
+    db.commit()
+    db.refresh(path)
+    return path
+
+
+@router.delete("/{pathologie_id}", status_code=204)
+def delete_pathologie(
+    pathologie_id: int,
+    db: Session = Depends(get_db)
+):
+    """Supprimer une pathologie."""
+    path = get_pathologie_by_id(db, pathologie_id)
+    if not path:
+        raise HTTPException(status_code=404, detail="Pathologie non trouvée")
+    
+    # Vérifier qu'elle n'est pas utilisée dans des cas cliniques
+    from app.models.cas_clinique import CasCliniqueEnrichi
+    used_in_cases = db.query(CasCliniqueEnrichi).filter(
+        CasCliniqueEnrichi.pathologie_principale_id == pathologie_id
+    ).count()
+    
+    if used_in_cases > 0:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Impossible de supprimer: utilisée dans {used_in_cases} cas cliniques"
+        )
+    
+    db.delete(path)
+    db.commit()
+    return None
+
+
+# ============================================================================
+### FICHIER 12: app/api/routes/symptomes.py
+
+
+
+# ============================================================================
+### FICHIER 13: app/api/routes/medicaments.py
+
+
+### FILE: ./__init__.py
+
+# ============================================================================
+### FICHIER 14: app/api/routes/__init__.py (MISE À JOUR COMPLÈTE)
+"""Initialisation des routes API - VERSION COMPLÈTE STI."""
+from fastapi import APIRouter
+
+# Core - Apprenants
+from app.api import learners
+
+# Compétences cliniques
+from app.api import competences
+from app.api import prerequis_competences
+from app.api import learner_competency_mastery
+
+# Sessions et interactions (CRITIQUE)
+from app.api import simulation_sessions
+from app.api import interaction_logs
+from app.api import cas_cliniques
+
+# Profils apprenants
+from app.api import learner_behavior
+from app.api import learner_cognitive
+from app.api import learner_affective
+
+# Performances et connaissances
+from app.api import performances
+from app.api import knowledge_inference
+
+# Adaptation intelligente (CRITIQUE)
+from app.api import adaptation_engine
+
+# Contenu médical
+from app.api import pathologies
+from app.api import symptomes
+from app.api import medicaments
+
+
+# Router principal
+api_router = APIRouter()
+
+# ============================================================================
+# GROUPE 1: CORE - Gestion des apprenants
+# ============================================================================
+api_router.include_router(
+    learners.router,
+    tags=["Learners"]
+)
+
+# ============================================================================
+# GROUPE 2: COMPÉTENCES CLINIQUES
+# ============================================================================
+api_router.include_router(
+    competences.router,
+    tags=["Clinical Competencies"]
+)
+
+api_router.include_router(
+    prerequis_competences.router,
+    tags=["Competency Prerequisites"]
+)
+
+api_router.include_router(
+    learner_competency_mastery.router,
+    tags=["Competency Mastery"]
+)
+
+# ============================================================================
+# GROUPE 3: SIMULATIONS (CRITIQUE)
+# ============================================================================
+api_router.include_router(
+    simulation_sessions.router,
+    tags=["Simulation Sessions"]
+)
+
+api_router.include_router(
+    interaction_logs.router,
+    tags=["Interaction Logs"]
+)
+
+api_router.include_router(
+    cas_cliniques.router,
+    tags=["Clinical Cases"]
+)
+
+# ============================================================================
+# GROUPE 4: PROFILS APPRENANTS
+# ============================================================================
+api_router.include_router(
+    learner_behavior.router,
+    tags=["Learner Behavior"]
+)
+
+api_router.include_router(
+    learner_cognitive.router,
+    tags=["Learner Cognitive"]
+)
+
+api_router.include_router(
+    learner_affective.router,
+    tags=["Learner Affective"]
+)
+
+# ============================================================================
+# GROUPE 5: ANALYTICS & ADAPTATION (CRITIQUE)
+# ============================================================================
+api_router.include_router(
+    performances.router,
+    tags=["Performance Analytics"]
+)
+
+api_router.include_router(
+    knowledge_inference.router,
+    tags=["Knowledge Inference"]
+)
+
+api_router.include_router(
+    adaptation_engine.router,
+    tags=["Adaptation Engine"]
+)
+
+# ============================================================================
+# GROUPE 6: CONTENU MÉDICAL
+# ============================================================================
+api_router.include_router(
+    pathologies.router,
+    tags=["Pathologies"]
+)
+
+api_router.include_router(
+    symptomes.router,
+    tags=["Symptoms"]
+)
+
+api_router.include_router(
+    medicaments.router,
+    tags=["Medications"]
+)
+
+
+# ============================================================================
+# ENDPOINTS DE BASE (Health & Info)
+# ============================================================================
+@api_router.get("/", tags=["Root"])
+def root():
+    """Endpoint racine de l'API."""
+    return {
+        "message": "STI Backend API",
+        "version": "2.0.0",
+        "status": "operational",
+        "documentation": "/docs"
+    }
+
+
+@api_router.get("/health", tags=["Health"])
+def health_check():
+    """Vérifier la santé de l'API."""
+    return {
+        "status": "healthy",
+        "api": "STI Backend",
+        "version": "2.0.0"
+    }
+
+
+@api_router.get("/routes", tags=["Info"])
+def list_routes():
+    """Lister toutes les routes disponibles."""
+    return {
+        "core": {
+            "learners": "/learners"
+        },
+        "competencies": {
+            "competences": "/competences",
+            "prerequis": "/prerequis",
+            "mastery": "/mastery"
+        },
+        "simulations": {
+            "sessions": "/sessions",
+            "interactions": "/interactions",
+            "cases": "/cases"
+        },
+        "profiles": {
+            "behavior": "/behavior",
+            "cognitive": "/cognitive",
+            "affective": "/affective"
+        },
+        "analytics": {
+            "performances": "/performances",
+            "knowledge": "/knowledge",
+            "adaptation": "/adaptation"
+        },
+        "medical_content": {
+            "pathologies": "/pathologies",
+            "symptomes": "/symptomes",
+            "medicaments": "/medicaments"
+        }
+    }
+
+### FILE: ./interaction_logs.py
+
+"""Routes FastAPI pour les logs d'interaction - CRITIQUE."""
+from fastapi import APIRouter, Depends, HTTPException, Query
+from sqlalchemy.orm import Session
+from typing import Optional, List, Dict, Any
+from uuid import UUID
+from app.core.deps import get_db
+from app.models.interaction_log import InteractionLog
+from app.models.simulation_session import SimulationSession
+from app.schemas.interaction_log import (
+    InteractionLogCreate,
+    InteractionLogResponse,
+    InteractionLogUpdate,
+    InteractionLogBatchCreate,
+    InteractionLogWithContext
+)
+from app.services.interaction_log_service import (
+    create_interaction,
+    create_interactions_batch,
+    get_interactions_by_session,
+    get_interactions_by_category,
+    get_interactions_by_type,
+    mark_interaction_relevance,
+    analyze_session_interactions
+)
+
+router = APIRouter(prefix="/interactions", tags=["Interaction Logs"])
+
+
+@router.post("/", response_model=InteractionLogResponse, status_code=201)
+def create_interaction_log(
+    data: InteractionLogCreate,
+    db: Session = Depends(get_db)
+):
+    """Enregistrer une interaction."""
+    try:
+        log = create_interaction(
+            db,
+            data.session_id,
+            data.action_type,
+            data.action_category,
+            data.action_content,
+            data.response_latency
+        )
+        return log
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Erreur lors de l'enregistrement: {str(e)}")
+
+
+@router.post("/batch", response_model=list[InteractionLogResponse], status_code=201)
+def create_interactions_batch_endpoint(
+    data: InteractionLogBatchCreate,
+    db: Session = Depends(get_db)
+):
+    """Enregistrer plusieurs interactions en batch."""
+    # Vérifier que la session existe
+    session = db.query(SimulationSession).filter(
+        SimulationSession.id == data.session_id
+    ).first()
+    if not session:
+        raise HTTPException(status_code=404, detail="Session non trouvée")
+    
+    try:
+        logs = create_interactions_batch(db, data.session_id, data.actions)
+        return logs
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Erreur lors de l'enregistrement batch: {str(e)}")
+
+
+@router.get("/session/{session_id}", response_model=list[InteractionLogResponse])
+def get_session_interactions(
+    session_id: UUID,
+    db: Session = Depends(get_db)
+):
+    """Récupérer toutes les interactions d'une session."""
+    session = db.query(SimulationSession).filter(
+        SimulationSession.id == session_id
+    ).first()
+    if not session:
+        raise HTTPException(status_code=404, detail="Session non trouvée")
+    
+    return get_interactions_by_session(db, session_id)
+
+
+@router.get("/session/{session_id}/with-context", response_model=list[InteractionLogWithContext])
+def get_session_interactions_with_context(
+    session_id: UUID,
+    db: Session = Depends(get_db)
+):
+    """Récupérer les interactions avec contexte de session."""
+    session = db.query(SimulationSession).filter(
+        SimulationSession.id == session_id
+    ).first()
+    if not session:
+        raise HTTPException(status_code=404, detail="Session non trouvée")
+    
+    interactions = get_interactions_by_session(db, session_id)
+    
+    # Enrichir avec contexte
+    enriched = []
+    for interaction in interactions:
+        interaction_dict = {
+            **interaction.__dict__,
+            "learner_id": session.learner_id,
+            "cas_clinique_id": session.cas_clinique_id,
+            "session_statut": session.statut
+        }
+        enriched.append(interaction_dict)
+    
+    return enriched
+
+
+@router.get("/category/{session_id}/{category}", response_model=list[InteractionLogResponse])
+def get_interactions_by_category_endpoint(
+    session_id: UUID,
+    category: str,
+    db: Session = Depends(get_db)
+):
+    """Récupérer les interactions d'une catégorie donnée."""
+    return get_interactions_by_category(db, session_id, category)
+
+
+@router.get("/type/{session_id}/{action_type}", response_model=list[InteractionLogResponse])
+def get_interactions_by_type_endpoint(
+    session_id: UUID,
+    action_type: str,
+    db: Session = Depends(get_db)
+):
+    """Récupérer les interactions d'un type donné."""
+    return get_interactions_by_type(db, session_id, action_type)
+
+
+@router.put("/{interaction_id}/relevance", response_model=InteractionLogResponse)
+def mark_relevance(
+    interaction_id: int,
+    est_pertinent: bool = Query(..., description="Action pertinente?"),
+    charge_cognitive: Optional[float] = Query(None, ge=0.0, le=1.0),
+    db: Session = Depends(get_db)
+):
+    """Marquer la pertinence d'une interaction."""
+    log = mark_interaction_relevance(db, interaction_id, est_pertinent, charge_cognitive)
+    
+    if not log:
+        raise HTTPException(status_code=404, detail="Interaction non trouvée")
+    
+    return log
+
+
+@router.get("/analyze/{session_id}")
+def analyze_session(
+    session_id: UUID,
+    db: Session = Depends(get_db)
+):
+    """Analyser les interactions d'une session."""
+    session = db.query(SimulationSession).filter(
+        SimulationSession.id == session_id
+    ).first()
+    if not session:
+        raise HTTPException(status_code=404, detail="Session non trouvée")
+    
+    return analyze_session_interactions(db, session_id)
+
+
+@router.put("/{interaction_id}", response_model=InteractionLogResponse)
+def update_interaction(
+    interaction_id: int,
+    update_data: InteractionLogUpdate,
+    db: Session = Depends(get_db)
+):
+    """Mettre à jour une interaction."""
+    log = db.query(InteractionLog).filter(InteractionLog.id == interaction_id).first()
+    if not log:
+        raise HTTPException(status_code=404, detail="Interaction non trouvée")
+    
+    update_dict = update_data.model_dump(exclude_unset=True)
+    for field, value in update_dict.items():
+        setattr(log, field, value)
+    
+    db.commit()
+    db.refresh(log)
+    return log
+
+
+@router.delete("/{interaction_id}", status_code=204)
+def delete_interaction(
+    interaction_id: int,
+    db: Session = Depends(get_db)
+):
+    """Supprimer une interaction."""
+    log = db.query(InteractionLog).filter(InteractionLog.id == interaction_id).first()
+    if not log:
+        raise HTTPException(status_code=404, detail="Interaction non trouvée")
+    
+    db.delete(log)
+    db.commit()
+    return None
+
+
+### FILE: ./learners.py
+
+"""Routes FastAPI pour les apprenants."""
+from fastapi import APIRouter, Depends, HTTPException
+from sqlalchemy.orm import Session
+from app.core.deps import get_db
+from app.models.learner import Learner
+from app.schemas.learner import LearnerCreate, LearnerResponse, LearnerUpdate
+
+router = APIRouter(prefix="/learners", tags=["Learners"])
+
+
+@router.post("/", response_model=LearnerResponse, status_code=201)
+def create_learner(learner: LearnerCreate, db: Session = Depends(get_db)):
+    """Créer un nouvel apprenant."""
+    # Vérifier si l'email existe déjà
+    existing_email = db.query(Learner).filter(Learner.email == learner.email).first()
+    if existing_email:
+        raise HTTPException(status_code=400, detail="Email déjà utilisé")
+    
+    # Vérifier si le matricule existe déjà (si fourni)
+    if learner.matricule:
+        existing_matricule = db.query(Learner).filter(Learner.matricule == learner.matricule).first()
+        if existing_matricule:
+            raise HTTPException(status_code=400, detail="Matricule déjà utilisé")
+
+    new_learner = Learner(**learner.model_dump())
+    db.add(new_learner)
+    db.commit()
+    db.refresh(new_learner)
+    return new_learner
+
+
+@router.get("/", response_model=list[LearnerResponse])
+def list_learners(
+    skip: int = 0,
+    limit: int = 100,
+    db: Session = Depends(get_db)
+):
+    """Récupérer la liste des apprenants."""
+    learners = db.query(Learner).offset(skip).limit(limit).all()
+    return learners
+
+
+@router.get("/{learner_id}", response_model=LearnerResponse)
+def get_learner(learner_id: int, db: Session = Depends(get_db)):
+    """Récupérer un apprenant par ID."""
+    learner = db.query(Learner).filter(Learner.id == learner_id).first()
+    if not learner:
+        raise HTTPException(status_code=404, detail="Apprenant non trouvé")
+    return learner
+
+
+@router.get("/matricule/{matricule}", response_model=LearnerResponse)
+def get_learner_by_matricule(matricule: str, db: Session = Depends(get_db)):
+    """Récupérer un apprenant par matricule."""
+    learner = db.query(Learner).filter(Learner.matricule == matricule).first()
+    if not learner:
+        raise HTTPException(status_code=404, detail="Apprenant non trouvé")
+    return learner
+
+
+@router.put("/{learner_id}", response_model=LearnerResponse)
+def update_learner(
+    learner_id: int,
+    learner_update: LearnerUpdate,
+    db: Session = Depends(get_db)
+):
+    """Mettre à jour un apprenant."""
+    learner = db.query(Learner).filter(Learner.id == learner_id).first()
+    if not learner:
+        raise HTTPException(status_code=404, detail="Apprenant non trouvé")
+    
+    # Mettre à jour uniquement les champs fournis
+    update_data = learner_update.model_dump(exclude_unset=True)
+    for field, value in update_data.items():
+        setattr(learner, field, value)
+    
+    db.commit()
+    db.refresh(learner)
+    return learner
+
+
+@router.delete("/{learner_id}", status_code=204)
+def delete_learner(learner_id: int, db: Session = Depends(get_db)):
+    """Supprimer un apprenant."""
+    learner = db.query(Learner).filter(Learner.id == learner_id).first()
+    if not learner:
+        raise HTTPException(status_code=404, detail="Apprenant non trouvé")
+    
+    db.delete(learner)
+    db.commit()
+    return None
+
+### FILE: ./adaptation.py
+
+
+
+### FILE: ./medicaments.py
+
+"""Routes FastAPI pour les médicaments."""
+from fastapi import APIRouter, Depends, HTTPException, Query
+from sqlalchemy.orm import Session
+from typing import Optional
+from app.core.deps import get_db
+from app.models.medicament import Medicament
+from app.schemas.medicament import (
+    MedicamentCreate,
+    MedicamentResponse,
+    MedicamentUpdate,
+    MedicamentListResponse
+)
+
+router = APIRouter(prefix="/medicaments", tags=["Medications"])
+
+
+@router.post("/", response_model=MedicamentResponse, status_code=201)
+def create_medicament(
+    medicament: MedicamentCreate,
+    db: Session = Depends(get_db)
+):
+    """Créer un nouveau médicament."""
+    # Vérifier unicité DCI
+    existing = db.query(Medicament).filter(Medicament.dci == medicament.dci).first()
+    if existing and existing.nom_commercial == medicament.nom_commercial:
+        raise HTTPException(status_code=400, detail="Médicament déjà existant")
+    
+    new_med = Medicament(**medicament.model_dump())
+    db.add(new_med)
+    db.commit()
+    db.refresh(new_med)
+    return new_med
+
+
+@router.get("/", response_model=list[MedicamentListResponse])
+def list_medicaments(
+    skip: int = Query(0, ge=0),
+    limit: int = Query(100, ge=1, le=200),
+    classe_therapeutique: Optional[str] = None,
+    disponibilite_cameroun: Optional[str] = None,
+    db: Session = Depends(get_db)
+):
+    """Récupérer la liste des médicaments."""
+    query = db.query(Medicament)
+    
+    if classe_therapeutique:
+        query = query.filter(Medicament.classe_therapeutique == classe_therapeutique)
+    
+    if disponibilite_cameroun:
+        query = query.filter(Medicament.disponibilite_cameroun == disponibilite_cameroun)
+    
+    return query.offset(skip).limit(limit).all()
+
+
+@router.get("/{medicament_id}", response_model=MedicamentResponse)
+def get_medicament(
+    medicament_id: int,
+    db: Session = Depends(get_db)
+):
+    """Récupérer un médicament par ID."""
+    med = db.query(Medicament).filter(Medicament.id == medicament_id).first()
+    if not med:
+        raise HTTPException(status_code=404, detail="Médicament non trouvé")
+    return med
+
+
+@router.get("/dci/{dci}", response_model=list[MedicamentResponse])
+def get_by_dci(
+    dci: str,
+    db: Session = Depends(get_db)
+):
+    """Récupérer les médicaments par DCI."""
+    meds = db.query(Medicament).filter(Medicament.dci.ilike(f"%{dci}%")).all()
+    if not meds:
+        raise HTTPException(status_code=404, detail="Aucun médicament trouvé")
+    return meds
+
+
+@router.get("/search/", response_model=list[MedicamentListResponse])
+def search_medicaments(
+    q: str = Query(..., min_length=2),
+    limit: int = Query(20, ge=1, le=100),
+    db: Session = Depends(get_db)
+):
+    """Rechercher des médicaments par nom commercial ou DCI."""
+    search_pattern = f"%{q}%"
+    meds = db.query(Medicament).filter(
+        (Medicament.nom_commercial.ilike(search_pattern)) |
+        (Medicament.dci.ilike(search_pattern))
+    ).limit(limit).all()
+    
+    return meds
+
+
+@router.get("/classe/{classe_therapeutique}", response_model=list[MedicamentListResponse])
+def get_by_classe(
+    classe_therapeutique: str,
+    skip: int = Query(0, ge=0),
+    limit: int = Query(100, ge=1, le=200),
+    db: Session = Depends(get_db)
+):
+    """Récupérer les médicaments d'une classe thérapeutique."""
+    return db.query(Medicament).filter(
+        Medicament.classe_therapeutique == classe_therapeutique
+    ).offset(skip).limit(limit).all()
+
+
+@router.get("/disponibles/", response_model=list[MedicamentListResponse])
+def get_disponibles_cameroun(
+    skip: int = Query(0, ge=0),
+    limit: int = Query(100, ge=1, le=200),
+    db: Session = Depends(get_db)
+):
+    """Récupérer les médicaments disponibles au Cameroun."""
+    return db.query(Medicament).filter(
+        Medicament.disponibilite_cameroun.in_(["disponible", "largement_disponible"])
+    ).offset(skip).limit(limit).all()
+
+
+@router.get("/cout/", response_model=list[MedicamentListResponse])
+def get_by_cout(
+    cout_max: int = Query(..., ge=0),
+    skip: int = Query(0, ge=0),
+    limit: int = Query(100, ge=1, le=200),
+    db: Session = Depends(get_db)
+):
+    """Récupérer les médicaments par coût maximum."""
+    return db.query(Medicament).filter(
+        Medicament.cout_moyen_fcfa <= cout_max
+    ).offset(skip).limit(limit).all()
+
+
+@router.put("/{medicament_id}", response_model=MedicamentResponse)
+def update_medicament(
+    medicament_id: int,
+    medicament_update: MedicamentUpdate,
+    db: Session = Depends(get_db)
+):
+    """Mettre à jour un médicament."""
+    med = db.query(Medicament).filter(Medicament.id == medicament_id).first()
+    if not med:
+        raise HTTPException(status_code=404, detail="Médicament non trouvé")
+    
+    update_dict = medicament_update.model_dump(exclude_unset=True)
+    for field, value in update_dict.items():
+        setattr(med, field, value)
+    
+    db.commit()
+    db.refresh(med)
+    return med
+
+
+@router.delete("/{medicament_id}", status_code=204)
+def delete_medicament(
+    medicament_id: int,
+    db: Session = Depends(get_db)
+):
+    """Supprimer un médicament."""
+    med = db.query(Medicament).filter(Medicament.id == medicament_id).first()
+    if not med:
+        raise HTTPException(status_code=404, detail="Médicament non trouvé")
+    
+    db.delete(med)
+    db.commit()
+    return None
+
+
+
+
+### FILE: ./adaptation_engine.py
+
+### FICHIER 7: app/api/routes/adaptation_engine.py
+"""Routes FastAPI pour le moteur d'adaptation intelligente - CRITIQUE."""
+from fastapi import APIRouter, Depends, HTTPException, Query, Body
+from sqlalchemy.orm import Session
+from typing import List, Dict, Any
+from uuid import UUID
+from app.core.deps import get_db
+from app.models.learner import Learner
+from app.models.simulation_session import SimulationSession
+from app.services.adaptation_engine import (
+    process_simulation_completion,
+    get_adaptation_summary
+)
+
+router = APIRouter(prefix="/adaptation", tags=["Adaptation Engine"])
+
+
+@router.post("/process-simulation")
+def process_simulation(
+    session_id: UUID = Body(...),
+    actions: List[Dict[str, Any]] = Body(...),
+    diagnostic_propose: str = Body(...),
+    diagnostic_correct: bool = Body(...),
+    db: Session = Depends(get_db)
+):
+    """
+    Traiter la fin d'une simulation complète (orchestration).
+    
+    Flux complet:
+    1. Enregistrer toutes les actions (InteractionLog)
+    2. Extraire et mettre à jour les maîtrises de compétences (BKT)
+    3. Calculer le score final de la session
+    4. Mettre à jour l'état affectif
+    5. Mettre à jour le comportement
+    6. Générer une recommandation pédagogique
+    7. Déterminer l'action suivante
+    """
+    # Vérifier que la session existe
+    session = db.query(SimulationSession).filter(
+        SimulationSession.id == session_id
+    ).first()
+    if not session:
+        raise HTTPException(status_code=404, detail="Session non trouvée")
+    
+    # Vérifier que la session n'est pas déjà terminée
+    if session.statut == "termine":
+        raise HTTPException(
+            status_code=400,
+            detail="Session déjà terminée"
+        )
+    
+    try:
+        result = process_simulation_completion(
+            db,
+            session_id,
+            actions,
+            diagnostic_propose,
+            diagnostic_correct
+        )
+        
+        return {
+            "status": "success",
+            "message": "Simulation traitée avec succès",
+            "result": result
+        }
+    
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Erreur lors du traitement: {str(e)}"
+        )
+
+
+@router.get("/summary/{learner_id}")
+def get_summary(
+    learner_id: int,
+    db: Session = Depends(get_db)
+):
+    """
+    Obtenir un résumé complet de l'adaptation pour un apprenant.
+    
+    Inclut:
+    - Modèle de connaissances (compétences maîtrisées)
+    - Modèle de performances (scores, progression)
+    - Modèle comportemental (engagement)
+    - État affectif (motivation, frustration, etc.)
+    - Statut global et recommandations
+    """
+    learner = db.query(Learner).filter(Learner.id == learner_id).first()
+    if not learner:
+        raise HTTPException(status_code=404, detail="Apprenant non trouvé")
+    
+    try:
+        summary = get_adaptation_summary(db, learner_id)
+        return summary
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Erreur lors de la génération du résumé: {str(e)}"
+        )
+
+
+@router.post("/batch-process")
+def batch_process(
+    simulations: List[Dict[str, Any]] = Body(...),
+    db: Session = Depends(get_db)
+):
+    """
+    Traiter plusieurs simulations en batch.
+    
+    Format attendu pour chaque simulation:
+    {
+        "session_id": UUID,
+        "actions": List[Dict],
+        "diagnostic_propose": str,
+        "diagnostic_correct": bool
+    }
+    """
+    results = []
+    successful = 0
+    failed = 0
+    
+    for sim in simulations:
+        try:
+            session_id = UUID(sim.get("session_id"))
+            actions = sim.get("actions", [])
+            diagnostic_propose = sim.get("diagnostic_propose", "")
+            diagnostic_correct = sim.get("diagnostic_correct", False)
+            
+            # Vérifier que la session existe
+            session = db.query(SimulationSession).filter(
+                SimulationSession.id == session_id
+            ).first()
+            
+            if not session:
+                results.append({
+                    "status": "error",
+                    "session_id": str(session_id),
+                    "message": "Session non trouvée"
+                })
+                failed += 1
+                continue
+            
+            # Traiter
+            result = process_simulation_completion(
+                db,
+                session_id,
+                actions,
+                diagnostic_propose,
+                diagnostic_correct
+            )
+            
+            results.append({
+                "status": "success",
+                "session_id": str(session_id),
+                "learner_id": result["learner_id"],
+                "score_final": result["score_final"],
+                "recommendation": result["recommendation"]
+            })
+            successful += 1
+        
+        except Exception as e:
+            results.append({
+                "status": "error",
+                "session_id": sim.get("session_id", "unknown"),
+                "message": str(e)
+            })
+            failed += 1
+    
+    return {
+        "total": len(simulations),
+        "successful": successful,
+        "failed": failed,
+        "results": results
+    }
+
+
+@router.get("/recommendations/{learner_id}")
+def get_recommendations(
+    learner_id: int,
+    db: Session = Depends(get_db)
+):
+    """Obtenir des recommandations pédagogiques personnalisées."""
+    learner = db.query(Learner).filter(Learner.id == learner_id).first()
+    if not learner:
+        raise HTTPException(status_code=404, detail="Apprenant non trouvé")
+    
+    # Obtenir le résumé complet
+    summary = get_adaptation_summary(db, learner_id)
+    
+    # Extraire les recommandations
+    knowledge = summary.get("knowledge_model", {})
+    performance = summary.get("performance_model", {})
+    behavioral = summary.get("behavioral_model", {})
+    affective = summary.get("affective_state", {})
+    
+    recommendations = []
+    
+    # Recommandations basées sur les compétences faibles
+    avg_mastery = knowledge.get("average_mastery", 0)
+    if avg_mastery < 0.5:
+        recommendations.append({
+            "type": "knowledge",
+            "priority": "high",
+            "message": "Renforcer les compétences de base avec des cas guidés"
+        })
+    
+    # Recommandations basées sur les performances
+    avg_score = performance.get("average_score", 0)
+    trend = performance.get("trend", "stable")
+    
+    if avg_score < 50:
+        recommendations.append({
+            "type": "performance",
+            "priority": "high",
+            "message": "Revoir les fondamentaux et pratiquer sur des cas plus simples"
+        })
+    elif trend == "declining":
+        recommendations.append({
+            "type": "performance",
+            "priority": "medium",
+            "message": "Tendance à la baisse détectée. Faire une pause ou réviser les concepts"
+        })
+    
+    # Recommandations basées sur le comportement
+    engagement = behavioral.get("engagement_score", 0)
+    if engagement < 0.3:
+        recommendations.append({
+            "type": "behavioral",
+            "priority": "high",
+            "message": "Engagement très faible. Proposer des activités plus motivantes"
+        })
+    
+    # Recommandations basées sur l'affectif
+    affective_label = affective.get("label", "")
+    if "Négatif" in affective_label:
+        recommendations.append({
+            "type": "affective",
+            "priority": "high",
+            "message": "État émotionnel négatif. Fournir du soutien et encouragements"
+        })
+    
+    return {
+        "learner_id": learner_id,
+        "recommendations_count": len(recommendations),
+        "recommendations": recommendations,
+        "summary": {
+            "average_mastery": avg_mastery,
+            "average_score": avg_score,
+            "engagement_score": engagement,
+            "affective_state": affective_label
+        }
+    }
+
+
+@router.get("/health")
+def health_check(db: Session = Depends(get_db)):
+    """Vérifier la santé du moteur d'adaptation."""
+    try:
+        # Tester la connexion DB
+        db.execute("SELECT 1")
+        
+        # Compter les sessions actives
+        active_sessions = db.query(SimulationSession).filter(
+            SimulationSession.statut == "en_cours"
+        ).count()
+        
+        # Compter les apprenants
+        total_learners = db.query(Learner).count()
+        
+        return {
+            "status": "healthy",
+            "engine": "Adaptation Engine",
+            "version": "1.0.0",
+            "database": "connected",
+            "active_sessions": active_sessions,
+            "total_learners": total_learners,
+            "message": "Moteur d'adaptation opérationnel"
+        }
+    
+    except Exception as e:
+        raise HTTPException(
+            status_code=503,
+            detail=f"Moteur d'adaptation indisponible: {str(e)}"
+        )
+
+
+# ============================================================================
+### FICHIER 8: app/api/routes/performances.py
+
+
+### FILE: ./learner_knowledge.py
+
+"""Routes FastAPI pour le modèle de connaissances de l'apprenant."""
+from fastapi import APIRouter, Depends, HTTPException
+from sqlalchemy.orm import Session
+from Backend.app.models.learner_competency_mastery import LearnerKnowledge
+from app.models.learner import Learner
+from app.models.concept import Concept
+from Backend.app.schemas.learner_competency import (
+    LearnerKnowledgeCreate,
+    LearnerKnowledgeResponse
+)
+from app.core.deps import get_db
+from app.services.knowledge_update_service import get_mastery_label
+from app.services.knowledge_inference_service import (
+    get_learner_knowledge_summary,
+    infer_knowledge_from_activity
+)
+
+router = APIRouter(
+    prefix="/learner-knowledge",
+    tags=["Learner Knowledge"]
+)
+
+
+@router.post("/", response_model=LearnerKnowledgeResponse)
+def set_knowledge(
+    data: LearnerKnowledgeCreate,
+    db: Session = Depends(get_db)
+):
+    """Créer ou mettre à jour le niveau de maîtrise d'un concept pour un apprenant."""
+    # Vérifier que l'apprenant existe
+    learner = db.query(Learner).get(data.learner_id)
+    if not learner:
+        raise HTTPException(status_code=404, detail="Apprenant non trouvé")
+    
+    # Vérifier que le concept existe
+    concept = db.query(Concept).get(data.concept_id)
+    if not concept:
+        raise HTTPException(status_code=404, detail="Concept non trouvé")
+    
+    # Vérifier si l'enregistrement existe déjà
+    existing = db.query(LearnerKnowledge).filter(
+        LearnerKnowledge.learner_id == data.learner_id,
+        LearnerKnowledge.concept_id == data.concept_id
+    ).first()
+    
+    if existing:
+        # Mettre à jour
+        existing.mastery_level = data.mastery_level
+        db.commit()
+        db.refresh(existing)
+        return existing
+    else:
+        # Créer
+        lk = LearnerKnowledge(**data.dict())
+        db.add(lk)
+        db.commit()
+        db.refresh(lk)
+        return lk
+
+
+@router.get("/learner/{learner_id}", response_model=list[LearnerKnowledgeResponse])
+def get_learner_knowledge(
+    learner_id: int,
+    db: Session = Depends(get_db)
+):
+    """Récupérer le modèle de connaissances d'un apprenant."""
+    learner = db.query(Learner).get(learner_id)
+    if not learner:
+        raise HTTPException(status_code=404, detail="Apprenant non trouvé")
+    
+    return db.query(LearnerKnowledge).filter(
+        LearnerKnowledge.learner_id == learner_id
+    ).all()
+
+
+@router.get("/{learner_id}/{concept_id}", response_model=LearnerKnowledgeResponse)
+def get_knowledge_for_concept(
+    learner_id: int,
+    concept_id: int,
+    db: Session = Depends(get_db)
+):
+    """Récupérer le niveau de maîtrise d'un apprenant pour un concept spécifique."""
+    lk = db.query(LearnerKnowledge).filter(
+        LearnerKnowledge.learner_id == learner_id,
+        LearnerKnowledge.concept_id == concept_id
+    ).first()
+    
+    if not lk:
+        raise HTTPException(status_code=404, detail="Enregistrement de connaissances non trouvé")
+    
+    return lk
+
+
+@router.get("/summary/{learner_id}")
+def get_knowledge_summary(
+    learner_id: int,
+    db: Session = Depends(get_db)
+):
+    """Obtenir un résumé des connaissances d'un apprenant."""
+    learner = db.query(Learner).get(learner_id)
+    if not learner:
+        raise HTTPException(status_code=404, detail="Apprenant non trouvé")
+    
+    return get_learner_knowledge_summary(db, learner_id)
+
+
+@router.post("/update-from-activity/{learner_id}/{concept_id}/{score}")
+def update_knowledge_from_activity(
+    learner_id: int,
+    concept_id: int,
+    score: float,
+    db: Session = Depends(get_db)
+):
+    """Mettre à jour le niveau de maîtrise basé sur une activité."""
+    learner = db.query(Learner).get(learner_id)
+    if not learner:
+        raise HTTPException(status_code=404, detail="Apprenant non trouvé")
+    
+    concept = db.query(Concept).get(concept_id)
+    if not concept:
+        raise HTTPException(status_code=404, detail="Concept non trouvé")
+    
+    if not 0 <= score <= 100:
+        raise HTTPException(status_code=400, detail="Le score doit être entre 0 et 100")
+    
+    lk = infer_knowledge_from_activity(db, learner_id, concept_id, score)
+    
+    return {
+        "learner_id": learner_id,
+        "concept_id": concept_id,
+        "concept_name": concept.name,
+        "score": score,
+        "new_mastery_level": round(lk.mastery_level, 2),
+        "message": "Niveau de maîtrise mis à jour"
+    }
+
+
+@router.delete("/{learner_id}/{concept_id}")
+def delete_knowledge(
+    learner_id: int,
+    concept_id: int,
+    db: Session = Depends(get_db)
+):
+    """Supprimer un enregistrement de connaissances."""
+    lk = db.query(LearnerKnowledge).filter(
+        LearnerKnowledge.learner_id == learner_id,
+        LearnerKnowledge.concept_id == concept_id
+    ).first()
+    
+    if not lk:
+        raise HTTPException(status_code=404, detail="Enregistrement de connaissances non trouvé")
+    
+    db.delete(lk)
+    db.commit()
+    
+    return {"message": "Enregistrement de connaissances supprimé avec succès"}
+
+
+### FILE: ./prerequis_competences.py
+
+
+from fastapi import APIRouter, Depends, HTTPException, Query
+from sqlalchemy.orm import Session
+from app.core.deps import get_db
+from app.models.prerequis_competence import PrerequisCompetence
+from app.models.competence_clinique import CompetenceClinique
+from app.schemas.prerequis_competence import (
+    PrerequisCompetenceCreate,
+    PrerequisCompetenceResponse,
+    PrerequisCompetenceUpdate,
+    PrerequisCompetenceWithNames
+)
+
+router = APIRouter(prefix="/prerequis", tags=["Competency Prerequisites"])
+
+
+@router.post("/", response_model=PrerequisCompetenceResponse, status_code=201)
+def create_prerequis(
+    prerequis: PrerequisCompetenceCreate,
+    db: Session = Depends(get_db)
+):
+    """Créer une relation de prérequis."""
+    # Vérifier que les deux compétences existent
+    competence = db.query(CompetenceClinique).filter(
+        CompetenceClinique.id == prerequis.competence_id
+    ).first()
+    if not competence:
+        raise HTTPException(status_code=404, detail="Compétence cible non trouvée")
+    
+    prerequis_comp = db.query(CompetenceClinique).filter(
+        CompetenceClinique.id == prerequis.prerequis_id
+    ).first()
+    if not prerequis_comp:
+        raise HTTPException(status_code=404, detail="Compétence prérequise non trouvée")
+    
+    # Éviter les cycles (une compétence ne peut être prérequis d'elle-même)
+    if prerequis.competence_id == prerequis.prerequis_id:
+        raise HTTPException(
+            status_code=400,
+            detail="Une compétence ne peut être prérequis d'elle-même"
+        )
+    
+    # Vérifier que la relation n'existe pas déjà
+    existing = db.query(PrerequisCompetence).filter(
+        PrerequisCompetence.competence_id == prerequis.competence_id,
+        PrerequisCompetence.prerequis_id == prerequis.prerequis_id
+    ).first()
+    if existing:
+        raise HTTPException(status_code=400, detail="Relation de prérequis déjà existante")
+    
+    new_prerequis = PrerequisCompetence(**prerequis.model_dump())
+    db.add(new_prerequis)
+    db.commit()
+    db.refresh(new_prerequis)
+    return new_prerequis
+
+
+@router.get("/competence/{competence_id}", response_model=list[PrerequisCompetenceWithNames])
+def get_prerequis_for_competence(
+    competence_id: int,
+    db: Session = Depends(get_db)
+):
+    """Récupérer tous les prérequis d'une compétence."""
+    competence = db.query(CompetenceClinique).filter(
+        CompetenceClinique.id == competence_id
+    ).first()
+    if not competence:
+        raise HTTPException(status_code=404, detail="Compétence non trouvée")
+    
+    prerequis_relations = db.query(PrerequisCompetence).filter(
+        PrerequisCompetence.competence_id == competence_id
+    ).all()
+    
+    # Enrichir avec les noms
+    enriched = []
+    for rel in prerequis_relations:
+        comp = db.query(CompetenceClinique).filter(
+            CompetenceClinique.id == rel.competence_id
+        ).first()
+        prereq = db.query(CompetenceClinique).filter(
+            CompetenceClinique.id == rel.prerequis_id
+        ).first()
+        
+        enriched.append({
+            **rel.__dict__,
+            "competence_code": comp.code_competence if comp else None,
+            "competence_nom": comp.nom if comp else None,
+            "prerequis_code": prereq.code_competence if prereq else None,
+            "prerequis_nom": prereq.nom if prereq else None
+        })
+    
+    return enriched
+
+
+@router.get("/depends-on/{competence_id}", response_model=list[PrerequisCompetenceWithNames])
+def get_depends_on_competence(
+    competence_id: int,
+    db: Session = Depends(get_db)
+):
+    """Récupérer toutes les compétences qui dépendent de celle-ci."""
+    competence = db.query(CompetenceClinique).filter(
+        CompetenceClinique.id == competence_id
+    ).first()
+    if not competence:
+        raise HTTPException(status_code=404, detail="Compétence non trouvée")
+    
+    dependent_relations = db.query(PrerequisCompetence).filter(
+        PrerequisCompetence.prerequis_id == competence_id
+    ).all()
+    
+    # Enrichir avec les noms
+    enriched = []
+    for rel in dependent_relations:
+        comp = db.query(CompetenceClinique).filter(
+            CompetenceClinique.id == rel.competence_id
+        ).first()
+        prereq = db.query(CompetenceClinique).filter(
+            CompetenceClinique.id == rel.prerequis_id
+        ).first()
+        
+        enriched.append({
+            **rel.__dict__,
+            "competence_code": comp.code_competence if comp else None,
+            "competence_nom": comp.nom if comp else None,
+            "prerequis_code": prereq.code_competence if prereq else None,
+            "prerequis_nom": prereq.nom if prereq else None
+        })
+    
+    return enriched
+
+
+@router.put("/{prerequis_id}", response_model=PrerequisCompetenceResponse)
+def update_prerequis(
+    prerequis_id: int,
+    prerequis_update: PrerequisCompetenceUpdate,
+    db: Session = Depends(get_db)
+):
+    """Mettre à jour une relation de prérequis."""
+    prerequis = db.query(PrerequisCompetence).filter(
+        PrerequisCompetence.id == prerequis_id
+    ).first()
+    if not prerequis:
+        raise HTTPException(status_code=404, detail="Relation de prérequis non trouvée")
+    
+    update_dict = prerequis_update.model_dump(exclude_unset=True)
+    for field, value in update_dict.items():
+        setattr(prerequis, field, value)
+    
+    db.commit()
+    db.refresh(prerequis)
+    return prerequis
+
+
+@router.delete("/{prerequis_id}", status_code=204)
+def delete_prerequis(
+    prerequis_id: int,
+    db: Session = Depends(get_db)
+):
+    """Supprimer une relation de prérequis."""
+    prerequis = db.query(PrerequisCompetence).filter(
+        PrerequisCompetence.id == prerequis_id
+    ).first()
+    if not prerequis:
+        raise HTTPException(status_code=404, detail="Relation de prérequis non trouvée")
+    
+    db.delete(prerequis)
+    db.commit()
+    return None
+
+
+
+### FILE: ./cas_cliniques.py
+
+from fastapi import APIRouter, Depends, HTTPException, Query
+from sqlalchemy.orm import Session
+from typing import Optional, List
+from app.core.deps import get_db
+from app.models.cas_clinique import CasCliniqueEnrichi
+from app.models.pathologie import Pathologie
+from app.schemas.cas_clinique import (
+    CasCliniqueCreate,
+    CasCliniqueResponse,
+    CasCliniqueUpdate,
+    CasCliniqueListResponse
+)
+from app.services.cas_clinique_service import (
+    get_all_cases,
+    get_case_by_id,
+    get_case_by_code,
+    get_cases_by_pathologie,
+    get_cases_by_competences,
+    increment_case_usage,
+    update_case_statistics,
+    get_recommended_cases_for_learner
+)
+
+router = APIRouter(prefix="/cases", tags=["Clinical Cases"])
+
+
+@router.post("/", response_model=CasCliniqueResponse, status_code=201)
+def create_case(
+    case: CasCliniqueCreate,
+    db: Session = Depends(get_db)
+):
+    """Créer un nouveau cas clinique."""
+    # Vérifier que la pathologie existe si fournie
+    if case.pathologie_principale_id:
+        pathologie = db.query(Pathologie).filter(
+            Pathologie.id == case.pathologie_principale_id
+        ).first()
+        if not pathologie:
+            raise HTTPException(status_code=404, detail="Pathologie non trouvée")
+    
+    # Vérifier unicité du code Fultang
+    if case.code_fultang:
+        existing = db.query(CasCliniqueEnrichi).filter(
+            CasCliniqueEnrichi.code_fultang == case.code_fultang
+        ).first()
+        if existing:
+            raise HTTPException(status_code=400, detail="Code Fultang déjà existant")
+    
+    new_case = CasCliniqueEnrichi(**case.model_dump())
+    db.add(new_case)
+    db.commit()
+    db.refresh(new_case)
+    return new_case
+
+
+@router.get("/", response_model=list[CasCliniqueListResponse])
+def list_cases(
+    skip: int = Query(0, ge=0),
+    limit: int = Query(100, ge=1, le=200),
+    niveau_difficulte: Optional[int] = Query(None, ge=1, le=5),
+    valide_expert: Optional[bool] = Query(True),
+    db: Session = Depends(get_db)
+):
+    """Récupérer la liste des cas cliniques."""
+    return get_all_cases(db, skip, limit, niveau_difficulte, valide_expert)
+
+
+@router.get("/{cas_id}", response_model=CasCliniqueResponse)
+def get_case(
+    cas_id: int,
+    db: Session = Depends(get_db)
+):
+    """Récupérer un cas clinique par ID."""
+    case = get_case_by_id(db, cas_id)
+    if not case:
+        raise HTTPException(status_code=404, detail="Cas clinique non trouvé")
+    return case
+
+
+@router.get("/code/{code_fultang}", response_model=CasCliniqueResponse)
+def get_case_by_code_endpoint(
+    code_fultang: str,
+    db: Session = Depends(get_db)
+):
+    """Récupérer un cas clinique par code Fultang."""
+    case = get_case_by_code(db, code_fultang)
+    if not case:
+        raise HTTPException(status_code=404, detail="Cas clinique non trouvé")
+    return case
+
+
+@router.get("/pathologie/{pathologie_id}", response_model=list[CasCliniqueListResponse])
+def get_cases_by_pathologie_endpoint(
+    pathologie_id: int,
+    skip: int = Query(0, ge=0),
+    limit: int = Query(50, ge=1, le=200),
+    db: Session = Depends(get_db)
+):
+    """Récupérer les cas pour une pathologie donnée."""
+    pathologie = db.query(Pathologie).filter(Pathologie.id == pathologie_id).first()
+    if not pathologie:
+        raise HTTPException(status_code=404, detail="Pathologie non trouvée")
+    
+    return get_cases_by_pathologie(db, pathologie_id, skip, limit)
+
+
+@router.post("/by-competences", response_model=list[CasCliniqueListResponse])
+def get_cases_by_competences_endpoint(
+    competences_ids: List[int],
+    skip: int = Query(0, ge=0),
+    limit: int = Query(50, ge=1, le=200),
+    db: Session = Depends(get_db)
+):
+    """Récupérer les cas qui sollicitent des compétences données."""
+    if not competences_ids:
+        raise HTTPException(status_code=400, detail="Liste de compétences vide")
+    
+    return get_cases_by_competences(db, competences_ids, skip, limit)
+
+
+@router.get("/recommend/{learner_id}")
+def recommend_cases(
+    learner_id: int,
+    limit: int = Query(5, ge=1, le=20),
+    db: Session = Depends(get_db)
+):
+    """Recommander des cas adaptés au niveau de l'apprenant."""
+    from app.models.learner import Learner
+    
+    learner = db.query(Learner).filter(Learner.id == learner_id).first()
+    if not learner:
+        raise HTTPException(status_code=404, detail="Apprenant non trouvé")
+    
+    recommendations = get_recommended_cases_for_learner(db, learner_id, limit)
+    
+    return {
+        "learner_id": learner_id,
+        "recommendations": [
+            {
+                "case_id": rec["case"].id,
+                "code_fultang": rec["case"].code_fultang,
+                "niveau_difficulte": rec["case"].niveau_difficulte,
+                "relevance_score": rec["relevance_score"],
+                "reason": rec["reason"]
+            }
+            for rec in recommendations
+        ]
+    }
+
+
+@router.post("/{cas_id}/increment-usage")
+def increment_usage(
+    cas_id: int,
+    db: Session = Depends(get_db)
+):
+    """Incrémenter le compteur d'utilisation d'un cas."""
+    case = get_case_by_id(db, cas_id)
+    if not case:
+        raise HTTPException(status_code=404, detail="Cas clinique non trouvé")
+    
+    increment_case_usage(db, cas_id)
+    
+    return {
+        "cas_id": cas_id,
+        "message": "Compteur d'utilisation incrémenté",
+        "nb_utilisations": (case.nb_utilisations or 0) + 1
+    }
+
+
+@router.put("/{cas_id}", response_model=CasCliniqueResponse)
+def update_case(
+    cas_id: int,
+    case_update: CasCliniqueUpdate,
+    db: Session = Depends(get_db)
+):
+    """Mettre à jour un cas clinique."""
+    case = get_case_by_id(db, cas_id)
+    if not case:
+        raise HTTPException(status_code=404, detail="Cas clinique non trouvé")
+    
+    update_dict = case_update.model_dump(exclude_unset=True)
+    for field, value in update_dict.items():
+        setattr(case, field, value)
+    
+    db.commit()
+    db.refresh(case)
+    return case
+
+
+@router.delete("/{cas_id}", status_code=204)
+def delete_case(
+    cas_id: int,
+    db: Session = Depends(get_db)
+):
+    """Supprimer un cas clinique."""
+    case = get_case_by_id(db, cas_id)
+    if not case:
+        raise HTTPException(status_code=404, detail="Cas clinique non trouvé")
+    
+    db.delete(case)
+    db.commit()
+    return None
+
+### FILE: ./learner_behavior.py
+
+"""Routes FastAPI pour l'état affectif - COMPATIBLE STI."""
+from fastapi import APIRouter, Depends, HTTPException, Query
+from sqlalchemy.orm import Session
+from uuid import UUID
+from app.core.deps import get_db
+from app.models.learner_affective import LearnerAffectiveState
+from app.models.simulation_session import SimulationSession
+from app.models.learner import Learner
+from app.schemas.learner_affective import (
+    LearnerAffectiveCreate,
+    LearnerAffectiveResponse,
+    LearnerAffectiveUpdate
+)
+from app.services.affective_service import (
+    update_affective_state,
+    record_affective_state,
+    get_latest_affective_state,
+    get_affective_profile,
+    get_feedback_type
+)
+
+router = APIRouter(prefix="/affective", tags=["Learner Affective"])
+
+
+@router.post("/", response_model=LearnerAffectiveResponse, status_code=201)
+def create_affective_state(
+    data: LearnerAffectiveCreate,
+    db: Session = Depends(get_db)
+):
+    """Enregistrer un nouvel état affectif pour une session."""
+    # Vérifier que la session existe
+    session = db.query(SimulationSession).filter(
+        SimulationSession.id == data.session_id
+    ).first()
+    if not session:
+        raise HTTPException(status_code=404, detail="Session non trouvée")
+    
+    affective = record_affective_state(
+        db,
+        data.session_id,
+        data.stress_level,
+        data.confidence_level,
+        data.motivation_level,
+        data.frustration_level
+    )
+    
+    return affective
+
+
+@router.get("/session/{session_id}", response_model=list[LearnerAffectiveResponse])
+def get_session_affective_states(
+    session_id: UUID,
+    db: Session = Depends(get_db)
+):
+    """Récupérer tous les états affectifs d'une session."""
+    session = db.query(SimulationSession).filter(
+        SimulationSession.id == session_id
+    ).first()
+    if not session:
+        raise HTTPException(status_code=404, detail="Session non trouvée")
+    
+    states = db.query(LearnerAffectiveState).filter(
+        LearnerAffectiveState.session_id == session_id
+    ).order_by(LearnerAffectiveState.timestamp).all()
+    
+    return states
+
+
+@router.get("/latest/{learner_id}", response_model=LearnerAffectiveResponse)
+def get_latest_learner_affective(
+    learner_id: int,
+    db: Session = Depends(get_db)
+):
+    """Récupérer le dernier état affectif d'un apprenant (toutes sessions)."""
+    learner = db.query(Learner).filter(Learner.id == learner_id).first()
+    if not learner:
+        raise HTTPException(status_code=404, detail="Apprenant non trouvé")
+    
+    # Trouver la dernière session
+    latest_session = db.query(SimulationSession).filter(
+        SimulationSession.learner_id == learner_id
+    ).order_by(SimulationSession.start_time.desc()).first()
+    
+    if not latest_session:
+        raise HTTPException(status_code=404, detail="Aucune session trouvée")
+    
+    affective = get_latest_affective_state(db, latest_session.id)
+    if not affective:
+        raise HTTPException(status_code=404, detail="État affectif non trouvé")
+    
+    return affective
+
+
+@router.post("/update-from-score")
+def update_from_score(
+    session_id: UUID = Query(...),
+    score: float = Query(..., ge=0.0, le=100.0),
+    db: Session = Depends(get_db)
+):
+    """Mettre à jour l'état affectif basé sur un score."""
+    session = db.query(SimulationSession).filter(
+        SimulationSession.id == session_id
+    ).first()
+    if not session:
+        raise HTTPException(status_code=404, detail="Session non trouvée")
+    
+    # Récupérer le dernier état
+    latest = get_latest_affective_state(db, session_id)
+    
+    if latest:
+        motivation, frustration, confidence, stress = update_affective_state(
+            latest.motivation_level or 0.5,
+            latest.frustration_level or 0.0,
+            latest.confidence_level or 0.5,
+            latest.stress_level or 0.0,
+            score
+        )
+    else:
+        motivation, frustration, confidence, stress = update_affective_state(
+            0.5, 0.0, 0.5, 0.0, score
+        )
+    
+    # Enregistrer le nouvel état
+    new_affective = record_affective_state(
+        db, session_id, stress, confidence, motivation, frustration
+    )
+    
+    return {
+        "session_id": str(session_id),
+        "score": score,
+        "motivation": motivation,
+        "frustration": frustration,
+        "confidence": confidence,
+        "stress": stress,
+        "message": "État affectif mis à jour"
+    }
+
+
+@router.get("/profile/session/{session_id}")
+def get_profile_for_session(
+    session_id: UUID,
+    db: Session = Depends(get_db)
+):
+    """Obtenir le profil affectif pour une session."""
+    session = db.query(SimulationSession).filter(
+        SimulationSession.id == session_id
+    ).first()
+    if not session:
+        raise HTTPException(status_code=404, detail="Session non trouvée")
+    
+    affective = get_latest_affective_state(db, session_id)
+    if not affective:
+        raise HTTPException(status_code=404, detail="État affectif non trouvé")
+    
+    profile = get_affective_profile(
+        affective.motivation_level or 0.5,
+        affective.frustration_level or 0.0,
+        affective.confidence_level or 0.5,
+        affective.stress_level or 0.0
+    )
+    
+    return profile
+
+
+@router.get("/feedback-type/session/{session_id}")
+def get_feedback_for_session(
+    session_id: UUID,
+    db: Session = Depends(get_db)
+):
+    """Obtenir le type de feedback recommandé pour une session."""
+    session = db.query(SimulationSession).filter(
+        SimulationSession.id == session_id
+    ).first()
+    if not session:
+        raise HTTPException(status_code=404, detail="Session non trouvée")
+    
+    affective = get_latest_affective_state(db, session_id)
+    if not affective:
+        raise HTTPException(status_code=404, detail="État affectif non trouvé")
+    
+    feedback_type = get_feedback_type(
+        affective.motivation_level or 0.5,
+        affective.frustration_level or 0.0,
+        affective.confidence_level or 0.5,
+        affective.stress_level or 0.0
+    )
+    
+    return {
+        "session_id": str(session_id),
+        "feedback_type": feedback_type,
+        "description": _get_feedback_description(feedback_type)
+    }
+
+
+def _get_feedback_description(feedback_type: str) -> str:
+    """Obtenir une description du type de feedback."""
+    descriptions = {
+        "encouragement": "Fournir des encouragements et renforcer la motivation",
+        "aide": "Fournir une aide équilibrée avec guidance",
+        "challenge": "Proposer des défis plus complexes",
+        "soutien": "Fournir un soutien émotionnel et pédagogique"
+    }
+    return descriptions.get(feedback_type, "Type de feedback inconnu")
+
+
+@router.get("/history/{learner_id}")
+def get_affective_history(
+    learner_id: int,
+    limit: int = Query(10, ge=1, le=100),
+    db: Session = Depends(get_db)
+):
+    """Récupérer l'historique des états affectifs d'un apprenant."""
+    learner = db.query(Learner).filter(Learner.id == learner_id).first()
+    if not learner:
+        raise HTTPException(status_code=404, detail="Apprenant non trouvé")
+    
+    # Récupérer les sessions de l'apprenant
+    sessions = db.query(SimulationSession).filter(
+        SimulationSession.learner_id == learner_id
+    ).order_by(SimulationSession.start_time.desc()).limit(limit).all()
+    
+    history = []
+    for session in sessions:
+        affective = get_latest_affective_state(db, session.id)
+        if affective:
+            history.append({
+                "session_id": str(session.id),
+                "timestamp": affective.timestamp,
+                "motivation": affective.motivation_level,
+                "frustration": affective.frustration_level,
+                "confidence": affective.confidence_level,
+                "stress": affective.stress_level,
+                "score_session": session.score_final
+            })
+    
+    return {
+        "learner_id": learner_id,
+        "history_count": len(history),
+        "history": history
+    }
+
+
+@router.get("/evolution/{learner_id}")
+def get_affective_evolution(
+    learner_id: int,
+    db: Session = Depends(get_db)
+):
+    """Analyser l'évolution de l'état affectif d'un apprenant."""
+    learner = db.query(Learner).filter(Learner.id == learner_id).first()
+    if not learner:
+        raise HTTPException(status_code=404, detail="Apprenant non trouvé")
+    
+    # Récupérer toutes les sessions
+    sessions = db.query(SimulationSession).filter(
+        SimulationSession.learner_id == learner_id
+    ).order_by(SimulationSession.start_time).all()
+    
+    if not sessions:
+        return {
+            "learner_id": learner_id,
+            "message": "Aucune donnée disponible"
+        }
+    
+    # Collecter les données
+    motivation_values = []
+    frustration_values = []
+    confidence_values = []
+    stress_values = []
+    
+    for session in sessions:
+        affective = get_latest_affective_state(db, session.id)
+        if affective:
+            if affective.motivation_level is not None:
+                motivation_values.append(affective.motivation_level)
+            if affective.frustration_level is not None:
+                frustration_values.append(affective.frustration_level)
+            if affective.confidence_level is not None:
+                confidence_values.append(affective.confidence_level)
+            if affective.stress_level is not None:
+                stress_values.append(affective.stress_level)
+    
+    # Calculer les moyennes
+    def safe_avg(values):
+        return sum(values) / len(values) if values else 0.0
+    
+    # Déterminer les tendances
+    def get_trend(values):
+        if len(values) < 2:
+            return "stable"
+        first_half = values[:len(values)//2]
+        second_half = values[len(values)//2:]
+        avg_first = safe_avg(first_half)
+        avg_second = safe_avg(second_half)
+        diff = avg_second - avg_first
+        if diff > 0.1:
+            return "increasing"
+        elif diff < -0.1:
+            return "decreasing"
+        return "stable"
+    
+    return {
+        "learner_id": learner_id,
+        "sessions_analyzed": len(sessions),
+        "averages": {
+            "motivation": round(safe_avg(motivation_values), 2),
+            "frustration": round(safe_avg(frustration_values), 2),
+            "confidence": round(safe_avg(confidence_values), 2),
+            "stress": round(safe_avg(stress_values), 2)
+        },
+        "trends": {
+            "motivation": get_trend(motivation_values),
+            "frustration": get_trend(frustration_values),
+            "confidence": get_trend(confidence_values),
+            "stress": get_trend(stress_values)
+        },
+        "current_state": {
+            "motivation": motivation_values[-1] if motivation_values else None,
+            "frustration": frustration_values[-1] if frustration_values else None,
+            "confidence": confidence_values[-1] if confidence_values else None,
+            "stress": stress_values[-1] if stress_values else None
+        }
+    }
+
+
+@router.put("/{affective_id}", response_model=LearnerAffectiveResponse)
+def update_affective_state_endpoint(
+    affective_id: int,
+    update_data: LearnerAffectiveUpdate,
+    db: Session = Depends(get_db)
+):
+    """Mettre à jour un état affectif."""
+    affective = db.query(LearnerAffectiveState).filter(
+        LearnerAffectiveState.id == affective_id
+    ).first()
+    if not affective:
+        raise HTTPException(status_code=404, detail="État affectif non trouvé")
+    
+    update_dict = update_data.model_dump(exclude_unset=True)
+    for field, value in update_dict.items():
+        setattr(affective, field, value)
+    
+    db.commit()
+    db.refresh(affective)
+    return affective
+
+
+@router.delete("/{affective_id}", status_code=204)
+def delete_affective_state(
+    affective_id: int,
+    db: Session = Depends(get_db)
+):
+    """Supprimer un état affectif."""
+    affective = db.query(LearnerAffectiveState).filter(
+        LearnerAffectiveState.id == affective_id
+    ).first()
+    if not affective:
+        raise HTTPException(status_code=404, detail="État affectif non trouvé")
+    
+    db.delete(affective)
+    db.commit()
+    return None
+
+### FILE: ./simulation_sessions.py
+
+### FICHIER 1: app/api/routes/simulation_sessions.py
+"""Routes FastAPI pour les sessions de simulation - CRITIQUE."""
+from fastapi import APIRouter, Depends, HTTPException, Query
+from sqlalchemy.orm import Session
+from typing import Optional
+from uuid import UUID
+from app.core.deps import get_db
+from app.models.simulation_session import SimulationSession
+from app.models.learner import Learner
+from app.models.cas_clinique import CasCliniqueEnrichi
+from app.schemas.simulation_session import (
+    SimulationSessionCreate,
+    SimulationSessionResponse,
+    SimulationSessionUpdate,
+    SimulationSessionComplete,
+    SimulationSessionWithDetails
+)
+from app.services.simulation_session_service import (
+    create_session,
+    get_session_by_id,
+    get_sessions_by_learner,
+    update_session_stage,
+    complete_session,
+    abandon_session,
+    get_active_session,
+    get_session_statistics
+)
+
+router = APIRouter(prefix="/sessions", tags=["Simulation Sessions"])
+
+
+@router.post("/start", response_model=SimulationSessionResponse, status_code=201)
+def start_simulation_session(
+    data: SimulationSessionCreate,
+    db: Session = Depends(get_db)
+):
+    """Démarrer une nouvelle session de simulation."""
+    try:
+        session = create_session(db, data.learner_id, data.cas_clinique_id)
+        return session
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Erreur lors de la création: {str(e)}")
+
+
+@router.get("/{session_id}", response_model=SimulationSessionResponse)
+def get_simulation_session(
+    session_id: UUID,
+    db: Session = Depends(get_db)
+):
+    """Récupérer les détails d'une session."""
+    session = get_session_by_id(db, session_id)
+    if not session:
+        raise HTTPException(status_code=404, detail="Session non trouvée")
+    return session
+
+
+@router.get("/{session_id}/details", response_model=SimulationSessionWithDetails)
+def get_simulation_session_details(
+    session_id: UUID,
+    db: Session = Depends(get_db)
+):
+    """Récupérer les détails enrichis d'une session."""
+    session = get_session_by_id(db, session_id)
+    if not session:
+        raise HTTPException(status_code=404, detail="Session non trouvée")
+    
+    # Enrichir avec détails
+    learner = db.query(Learner).filter(Learner.id == session.learner_id).first()
+    case = db.query(CasCliniqueEnrichi).filter(CasCliniqueEnrichi.id == session.cas_clinique_id).first()
+    
+    from app.models.interaction_log import InteractionLog
+    nb_interactions = db.query(InteractionLog).filter(
+        InteractionLog.session_id == session_id
+    ).count()
+    
+    session_dict = {
+        **session.__dict__,
+        "learner_nom": learner.nom if learner else None,
+        "learner_matricule": learner.matricule if learner else None,
+        "cas_code_fultang": case.code_fultang if case else None,
+        "cas_niveau_difficulte": case.niveau_difficulte if case else None,
+        "nb_interactions": nb_interactions
+    }
+    
+    return session_dict
+
+
+@router.get("/learner/{learner_id}", response_model=list[SimulationSessionResponse])
+def get_learner_sessions(
+    learner_id: int,
+    skip: int = Query(0, ge=0),
+    limit: int = Query(50, ge=1, le=200),
+    db: Session = Depends(get_db)
+):
+    """Récupérer toutes les sessions d'un apprenant."""
+    learner = db.query(Learner).filter(Learner.id == learner_id).first()
+    if not learner:
+        raise HTTPException(status_code=404, detail="Apprenant non trouvé")
+    
+    return get_sessions_by_learner(db, learner_id, skip, limit)
+
+
+@router.get("/active/{learner_id}", response_model=SimulationSessionResponse)
+def get_learner_active_session(
+    learner_id: int,
+    db: Session = Depends(get_db)
+):
+    """Récupérer la session active d'un apprenant."""
+    learner = db.query(Learner).filter(Learner.id == learner_id).first()
+    if not learner:
+        raise HTTPException(status_code=404, detail="Apprenant non trouvé")
+    
+    session = get_active_session(db, learner_id)
+    if not session:
+        raise HTTPException(status_code=404, detail="Aucune session active")
+    
+    return session
+
+
+@router.put("/{session_id}/stage", response_model=SimulationSessionResponse)
+def update_stage(
+    session_id: UUID,
+    new_stage: str = Query(..., description="Nouvelle étape"),
+    db: Session = Depends(get_db)
+):
+    """Mettre à jour l'étape courante d'une session."""
+    valid_stages = ["anamnese", "examen_physique", "examens_complementaires", 
+                    "diagnostic", "traitement", "termine"]
+    
+    if new_stage not in valid_stages:
+        raise HTTPException(
+            status_code=400, 
+            detail=f"Étape invalide. Valeurs possibles: {', '.join(valid_stages)}"
+        )
+    
+    session = update_session_stage(db, session_id, new_stage)
+    if not session:
+        raise HTTPException(status_code=404, detail="Session non trouvée")
+    
+    return session
+
+
+@router.post("/{session_id}/complete", response_model=SimulationSessionResponse)
+def complete_simulation(
+    session_id: UUID,
+    completion_data: SimulationSessionComplete,
+    diagnostic_correct: bool = Query(..., description="Diagnostic correct?"),
+    db: Session = Depends(get_db)
+):
+    """Terminer une session de simulation."""
+    session = complete_session(
+        db,
+        session_id,
+        completion_data.score_final,
+        completion_data.raison_fin,
+        diagnostic_correct
+    )
+    
+    if not session:
+        raise HTTPException(status_code=404, detail="Session non trouvée")
+    
+    return session
+
+
+@router.post("/{session_id}/abandon", response_model=SimulationSessionResponse)
+def abandon_simulation(
+    session_id: UUID,
+    raison: str = Query("abandoned", description="Raison de l'abandon"),
+    db: Session = Depends(get_db)
+):
+    """Abandonner une session en cours."""
+    session = abandon_session(db, session_id, raison)
+    
+    if not session:
+        raise HTTPException(status_code=404, detail="Session non trouvée")
+    
+    return session
+
+
+@router.get("/stats/{learner_id}")
+def get_learner_session_stats(
+    learner_id: int,
+    db: Session = Depends(get_db)
+):
+    """Obtenir les statistiques des sessions d'un apprenant."""
+    learner = db.query(Learner).filter(Learner.id == learner_id).first()
+    if not learner:
+        raise HTTPException(status_code=404, detail="Apprenant non trouvé")
+    
+    return get_session_statistics(db, learner_id)
+
+
+@router.put("/{session_id}", response_model=SimulationSessionResponse)
+def update_session(
+    session_id: UUID,
+    update_data: SimulationSessionUpdate,
+    db: Session = Depends(get_db)
+):
+    """Mettre à jour une session."""
+    session = get_session_by_id(db, session_id)
+    if not session:
+        raise HTTPException(status_code=404, detail="Session non trouvée")
+    
+    # Mettre à jour uniquement les champs fournis
+    update_dict = update_data.model_dump(exclude_unset=True)
+    for field, value in update_dict.items():
+        setattr(session, field, value)
+    
+    db.commit()
+    db.refresh(session)
+    return session
+
+
+# ============================================================================
+### FICHIER 2: app/api/routes/interaction_logs.py
+
+
+# ============================================================================
+### FICHIER 3: app/api/routes/cas_cliniques.py
+"""Routes FastAPI pour les cas cliniques - CRITIQUE."""
+
+
+### FILE: ./learner_cognitive.py
+
+"""Modèle SQLAlchemy pour le profil cognitif de l'apprenant."""
+from sqlalchemy import Column, Integer, Float, ForeignKey, Boolean
+from sqlalchemy.orm import relationship
+from app.core.database import Base
+
+
+class LearnerCognitiveProfile(Base):
+    """Enregistre le profil cognitif d'un apprenant - Compatible STI."""
+    __tablename__ = "learner_cognitive_profiles"
+
+    id = Column(Integer, primary_key=True, index=True)
+    learner_id = Column(Integer, ForeignKey("learners.id"), unique=True, nullable=True)
+
+    # Colonnes de la base STI (conformes au schéma déployé)
+    vitesse_assimilation = Column(Float, nullable=True)
+    capacite_memoire_travail = Column(Float, nullable=True)
+    tendance_impulsivite = Column(Float, nullable=True)
+    prefer_visual = Column(Boolean, nullable=True)
+
+    # Relation
+    learner = relationship("Learner", back_populates="cognitive_profile")
+    
+    # Propriétés de compatibilité pour l'ancien code
+    @property
+    def learning_style(self):
+        """Compatibilité : déduit le style d'apprentissage"""
+        if self.prefer_visual:
+            return "visuel"
+        return "auditif"
+    
+    @property
+    def learning_speed(self):
+        """Compatibilité : alias pour vitesse_assimilation"""
+        return self.vitesse_assimilation
+    
+    @property
+    def autonomy_level(self):
+        """Compatibilité : calculé depuis tendance_impulsivite"""
+        if self.tendance_impulsivite is not None:
+            return 1.0 - self.tendance_impulsivite  # Autonomie inverse de l'impulsivité
+        return None
+    
+    def __repr__(self):
+        return f"<LearnerCognitiveProfile(id={self.id}, learner_id={self.learner_id})>"
+
+### FILE: ./learner_performance.py
+
+
+
+### FILE: ./competences.py
+
+### FICHIER 4: app/api/routes/competences.py
+"""Routes FastAPI pour les compétences cliniques."""
+from fastapi import APIRouter, Depends, HTTPException, Query
+from sqlalchemy.orm import Session
+from typing import Optional
+from app.core.deps import get_db
+from app.models.competence_clinique import CompetenceClinique
+from app.schemas.competence_clinique import (
+    CompetenceCliniqueCreate,
+    CompetenceCliniqueResponse,
+    CompetenceCliniqueUpdate,
+    CompetenceCliniqueWithPrerequisResponse
+)
+from app.services.competence_service import (
+    get_all_competences,
+    get_competence_by_id,
+    get_competence_by_code,
+    get_prerequis_for_competence,
+    get_competences_depending_on,
+    check_prerequisites_met,
+    get_learning_path
+)
+
+router = APIRouter(prefix="/competences", tags=["Clinical Competencies"])
+
+
+@router.post("/", response_model=CompetenceCliniqueResponse, status_code=201)
+def create_competence(
+    competence: CompetenceCliniqueCreate,
+    db: Session = Depends(get_db)
+):
+    """Créer une nouvelle compétence clinique."""
+    # Vérifier unicité du code
+    existing = db.query(CompetenceClinique).filter(
+        CompetenceClinique.code_competence == competence.code_competence
+    ).first()
+    if existing:
+        raise HTTPException(status_code=400, detail="Code compétence déjà existant")
+    
+    # Vérifier que le parent existe si fourni
+    if competence.parent_competence_id:
+        parent = db.query(CompetenceClinique).filter(
+            CompetenceClinique.id == competence.parent_competence_id
+        ).first()
+        if not parent:
+            raise HTTPException(status_code=404, detail="Compétence parente non trouvée")
+    
+    new_comp = CompetenceClinique(**competence.model_dump())
+    db.add(new_comp)
+    db.commit()
+    db.refresh(new_comp)
+    return new_comp
+
+
+@router.get("/", response_model=list[CompetenceCliniqueResponse])
+def list_competences(
+    skip: int = Query(0, ge=0),
+    limit: int = Query(100, ge=1, le=200),
+    categorie: Optional[str] = None,
+    db: Session = Depends(get_db)
+):
+    """Récupérer la liste des compétences cliniques."""
+    return get_all_competences(db, skip, limit, categorie)
+
+
+@router.get("/{competence_id}", response_model=CompetenceCliniqueResponse)
+def get_competence(
+    competence_id: int,
+    db: Session = Depends(get_db)
+):
+    """Récupérer une compétence par ID."""
+    comp = get_competence_by_id(db, competence_id)
+    if not comp:
+        raise HTTPException(status_code=404, detail="Compétence non trouvée")
+    return comp
+
+
+@router.get("/{competence_id}/with-prerequis", response_model=CompetenceCliniqueWithPrerequisResponse)
+def get_competence_with_prerequis(
+    competence_id: int,
+    db: Session = Depends(get_db)
+):
+    """Récupérer une compétence avec ses prérequis."""
+    comp = get_competence_by_id(db, competence_id)
+    if not comp:
+        raise HTTPException(status_code=404, detail="Compétence non trouvée")
+    
+    prerequis = get_prerequis_for_competence(db, competence_id)
+    prerequis_ids = [p.id for p in prerequis]
+    
+    comp_dict = {**comp.__dict__, "prerequis_ids": prerequis_ids}
+    return comp_dict
+
+
+@router.get("/code/{code_competence}", response_model=CompetenceCliniqueResponse)
+def get_competence_by_code_endpoint(
+    code_competence: str,
+    db: Session = Depends(get_db)
+):
+    """Récupérer une compétence par code."""
+    comp = get_competence_by_code(db, code_competence)
+    if not comp:
+        raise HTTPException(status_code=404, detail="Compétence non trouvée")
+    return comp
+
+
+@router.get("/categorie/{categorie}", response_model=list[CompetenceCliniqueResponse])
+def get_competences_by_categorie(
+    categorie: str,
+    skip: int = Query(0, ge=0),
+    limit: int = Query(100, ge=1, le=200),
+    db: Session = Depends(get_db)
+):
+    """Récupérer les compétences d'une catégorie."""
+    return get_all_competences(db, skip, limit, categorie)
+
+
+@router.get("/{competence_id}/prerequis", response_model=list[CompetenceCliniqueResponse])
+def get_prerequis(
+    competence_id: int,
+    db: Session = Depends(get_db)
+):
+    """Récupérer les prérequis d'une compétence."""
+    comp = get_competence_by_id(db, competence_id)
+    if not comp:
+        raise HTTPException(status_code=404, detail="Compétence non trouvée")
+    
+    return get_prerequis_for_competence(db, competence_id)
+
+
+@router.get("/{competence_id}/depends", response_model=list[CompetenceCliniqueResponse])
+def get_depends(
+    competence_id: int,
+    db: Session = Depends(get_db)
+):
+    """Récupérer les compétences qui dépendent de celle-ci."""
+    comp = get_competence_by_id(db, competence_id)
+    if not comp:
+        raise HTTPException(status_code=404, detail="Compétence non trouvée")
+    
+    return get_competences_depending_on(db, competence_id)
+
+
+@router.get("/{competence_id}/learning-path", response_model=list[CompetenceCliniqueResponse])
+def get_learning_path_endpoint(
+    competence_id: int,
+    db: Session = Depends(get_db)
+):
+    """Construire un chemin d'apprentissage pour atteindre une compétence."""
+    comp = get_competence_by_id(db, competence_id)
+    if not comp:
+        raise HTTPException(status_code=404, detail="Compétence non trouvée")
+    
+    return get_learning_path(db, competence_id)
+
+
+@router.get("/check-prerequis/{learner_id}/{competence_id}")
+def check_prerequis(
+    learner_id: int,
+    competence_id: int,
+    threshold: float = Query(0.7, ge=0.0, le=1.0),
+    db: Session = Depends(get_db)
+):
+    """Vérifier si un apprenant a les prérequis pour une compétence."""
+    from app.models.learner import Learner
+    
+    learner = db.query(Learner).filter(Learner.id == learner_id).first()
+    if not learner:
+        raise HTTPException(status_code=404, detail="Apprenant non trouvé")
+    
+    comp = get_competence_by_id(db, competence_id)
+    if not comp:
+        raise HTTPException(status_code=404, detail="Compétence non trouvée")
+    
+    prerequis_met = check_prerequisites_met(db, competence_id, learner_id, threshold)
+    prerequis = get_prerequis_for_competence(db, competence_id)
+    
+    return {
+        "learner_id": learner_id,
+        "competence_id": competence_id,
+        "competence_code": comp.code_competence,
+        "prerequis_met": prerequis_met,
+        "threshold": threshold,
+        "prerequis_count": len(prerequis),
+        "message": "Prérequis satisfaits" if prerequis_met else "Prérequis non satisfaits"
+    }
+
+
+@router.put("/{competence_id}", response_model=CompetenceCliniqueResponse)
+def update_competence(
+    competence_id: int,
+    competence_update: CompetenceCliniqueUpdate,
+    db: Session = Depends(get_db)
+):
+    """Mettre à jour une compétence."""
+    comp = get_competence_by_id(db, competence_id)
+    if not comp:
+        raise HTTPException(status_code=404, detail="Compétence non trouvée")
+    
+    update_dict = competence_update.model_dump(exclude_unset=True)
+    for field, value in update_dict.items():
+        setattr(comp, field, value)
+    
+    db.commit()
+    db.refresh(comp)
+    return comp
+
+
+@router.delete("/{competence_id}", status_code=204)
+def delete_competence(
+    competence_id: int,
+    db: Session = Depends(get_db)
+):
+    """Supprimer une compétence."""
+    comp = get_competence_by_id(db, competence_id)
+    if not comp:
+        raise HTTPException(status_code=404, detail="Compétence non trouvée")
+    
+    # Vérifier qu'elle n'a pas de compétences dépendantes
+    dependents = get_competences_depending_on(db, competence_id)
+    if dependents:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Impossible de supprimer: {len(dependents)} compétences en dépendent"
+        )
+    
+    db.delete(comp)
+    db.commit()
+    return None
+
+
+# ============================================================================
+### FICHIER 5: app/api/routes/prerequis_competences.py
+
+# ============================================================================
+### FICHIER 6: app/api/routes/learner_competency_mastery.py
+
+
+### FILE: ./performance.py
+
+"""Routes FastAPI pour l'analyse des performances."""
+from fastapi import APIRouter, Depends, HTTPException, Query
+from sqlalchemy.orm import Session
+from app.core.deps import get_db
+from app.models.learner import Learner
+from app.services.performance_service import (
+    get_learner_performance_stats,
+    get_performance_by_difficulty,
+    identify_weak_cases,
+    get_performance_summary
+)
+
+router = APIRouter(prefix="/performances", tags=["Performance Analytics"])
+
+
+@router.get("/stats/{learner_id}")
+def get_stats(
+    learner_id: int,
+    db: Session = Depends(get_db)
+):
+    """Obtenir les statistiques de performance d'un apprenant."""
+    learner = db.query(Learner).filter(Learner.id == learner_id).first()
+    if not learner:
+        raise HTTPException(status_code=404, detail="Apprenant non trouvé")
+    
+    return get_learner_performance_stats(db, learner_id)
+
+
+@router.get("/by-difficulty/{learner_id}")
+def get_by_difficulty(
+    learner_id: int,
+    db: Session = Depends(get_db)
+):
+    """Obtenir les performances par niveau de difficulté."""
+    learner = db.query(Learner).filter(Learner.id == learner_id).first()
+    if not learner:
+        raise HTTPException(status_code=404, detail="Apprenant non trouvé")
+    
+    stats = get_performance_by_difficulty(db, learner_id)
+    
+    return {
+        "learner_id": learner_id,
+        "by_difficulty": stats
+    }
+
+
+@router.get("/weak-cases/{learner_id}")
+def get_weak_cases(
+    learner_id: int,
+    threshold: float = Query(60.0, ge=0.0, le=100.0),
+    db: Session = Depends(get_db)
+):
+    """Identifier les cas où l'apprenant a eu des difficultés."""
+    learner = db.query(Learner).filter(Learner.id == learner_id).first()
+    if not learner:
+        raise HTTPException(status_code=404, detail="Apprenant non trouvé")
+    
+    weak = identify_weak_cases(db, learner_id, threshold)
+    
+    return {
+        "learner_id": learner_id,
+        "threshold": threshold,
+        "weak_cases_count": len(weak),
+        "weak_cases": weak
+    }
+
+
+@router.get("/summary/{learner_id}")
+def get_summary(
+    learner_id: int,
+    db: Session = Depends(get_db)
+):
+    """Obtenir un résumé complet des performances avec recommandations."""
+    learner = db.query(Learner).filter(Learner.id == learner_id).first()
+    if not learner:
+        raise HTTPException(status_code=404, detail="Apprenant non trouvé")
+    
+    return get_performance_summary(db, learner_id)
+
+
+@router.get("/trend/{learner_id}")
+def get_trend(
+    learner_id: int,
+    db: Session = Depends(get_db)
+):
+    """Obtenir la tendance des performances."""
+    from app.services.performance_service import compute_trend
+    from app.models.simulation_session import SimulationSession
+    
+    learner = db.query(Learner).filter(Learner.id == learner_id).first()
+    if not learner:
+        raise HTTPException(status_code=404, detail="Apprenant non trouvé")
+    
+    sessions = db.query(SimulationSession).filter(
+        SimulationSession.learner_id == learner_id,
+        SimulationSession.statut == "termine"
+    ).order_by(SimulationSession.start_time).all()
+    
+    scores = [s.score_final for s in sessions if s.score_final is not None]
+    
+    if not scores:
+        return {
+            "learner_id": learner_id,
+            "trend": "no_data",
+            "message": "Pas assez de données pour calculer la tendance"
+        }
+    
+    trend = compute_trend(scores)
+    
+    return {
+        "learner_id": learner_id,
+        "trend": trend,
+        "nb_sessions": len(scores),
+        "latest_scores": scores[-5:] if len(scores) >= 5 else scores,
+        "message": _get_trend_message(trend)
+    }
+
+
+def _get_trend_message(trend: str) -> str:
+    """Obtenir un message descriptif pour la tendance."""
+    messages = {
+        "improving": "Progression positive ! Continuez ainsi.",
+        "stable": "Performance stable. Maintenir le rythme.",
+        "declining": "Tendance à la baisse. Revoir les fondamentaux recommandé."
+    }
+    return messages.get(trend, "Tendance inconnue")
+
+
+
+
+### FILE: ./learning_history.py
+

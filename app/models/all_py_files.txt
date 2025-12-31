@@ -1,0 +1,665 @@
+
+
+### FILE: ./learner_competency_mastery.py
+
+"""Modèle SQLAlchemy pour la maîtrise des compétences."""
+from sqlalchemy import Column, Integer, ForeignKey, Float, DateTime
+from sqlalchemy.orm import relationship
+from app.core.database import Base
+
+
+class LearnerCompetencyMastery(Base):
+    """Niveau de maîtrise d'une compétence par un apprenant."""
+    __tablename__ = "learner_competency_mastery"
+
+    # Colonnes
+    id = Column(Integer, primary_key=True, index=True)
+    learner_id = Column(Integer, ForeignKey("learners.id"), nullable=False)
+    competence_id = Column(Integer, ForeignKey("competences_cliniques.id"), nullable=False)
+    mastery_level = Column(Float, nullable=True)
+    confidence = Column(Float, nullable=True)
+    last_practice_date = Column(DateTime(timezone=True), nullable=True)
+    nb_success = Column(Integer, nullable=True)
+    nb_failures = Column(Integer, nullable=True)
+    streak_correct = Column(Integer, nullable=True)
+
+    # Relations STI
+    learner = relationship(
+        "Learner",
+        back_populates="competency_masteries",
+        foreign_keys=[learner_id]
+    )
+    
+    competence = relationship(
+        "CompetenceClinique",
+        back_populates="mastery_records",
+        foreign_keys=[competence_id]
+    )
+    
+    def __repr__(self):
+        return f"<LearnerCompetencyMastery(learner={self.learner_id}, comp={self.competence_id}, mastery={self.mastery_level})>"
+
+### FILE: ./competence_clinique.py
+
+"""Modèle SQLAlchemy pour les compétences cliniques."""
+from sqlalchemy import Column, Integer, String, Text, DateTime, JSON
+from sqlalchemy.sql import func
+from sqlalchemy.orm import relationship
+from app.core.database import Base
+
+
+class CompetenceClinique(Base):
+    """Compétence clinique à acquérir."""
+    __tablename__ = "competences_cliniques"
+
+    # Colonnes
+    id = Column(Integer, primary_key=True, index=True)
+    code_competence = Column(String(50), unique=True, index=True, nullable=False)
+    nom = Column(String(255), nullable=False)
+    categorie = Column(String(100), index=True, nullable=True)
+    niveau_bloom = Column(Integer, nullable=True)
+    description = Column(Text, nullable=True)
+    objectifs_apprentissage = Column(JSON, nullable=True)
+    criteres_maitrise = Column(JSON, nullable=True)
+    parent_competence_id = Column(Integer, nullable=True)
+    ordre_apprentissage = Column(Integer, nullable=True)
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+
+    # Relations STI
+    mastery_records = relationship(
+        "LearnerCompetencyMastery",
+        back_populates="competence",
+        foreign_keys="[LearnerCompetencyMastery.competence_id]"
+    )
+    
+    prerequis_as_competence = relationship(
+        "PrerequisCompetence",
+        foreign_keys="[PrerequisCompetence.competence_id]",
+        back_populates="competence"
+    )
+    
+    prerequis_as_prerequis = relationship(
+        "PrerequisCompetence",
+        foreign_keys="[PrerequisCompetence.prerequis_id]",
+        back_populates="prerequis"
+    )
+
+    # Propriétés compatibilité BKT
+    @property
+    def name(self):
+        return self.code_competence
+    
+    @property
+    def p_init(self):
+        return 0.2
+    
+    @property
+    def p_transit(self):
+        return 0.15
+    
+    @property
+    def p_guess(self):
+        return 0.2
+    
+    @property
+    def p_slip(self):
+        return 0.1
+    
+    def __repr__(self):
+        return f"<CompetenceClinique(id={self.id}, code={self.code_competence})>"
+
+### FILE: ./learner_affective.py
+
+"""Modèle SQLAlchemy pour l'état affectif."""
+from sqlalchemy import Column, Integer, Float, DateTime, ForeignKey
+from sqlalchemy.sql import func
+from sqlalchemy.orm import relationship
+from sqlalchemy.dialects.postgresql import UUID
+from app.core.database import Base
+
+
+class LearnerAffectiveState(Base):
+    """État affectif d'un apprenant lors d'une session."""
+    __tablename__ = "learner_affective_states"
+
+    # Colonnes
+    id = Column(Integer, primary_key=True, index=True)
+    session_id = Column(UUID(as_uuid=True), ForeignKey("simulation_sessions.id"), nullable=True)
+    timestamp = Column(DateTime(timezone=True), server_default=func.now())
+    stress_level = Column(Float, nullable=True)
+    confidence_level = Column(Float, nullable=True)
+    motivation_level = Column(Float, nullable=True)
+    frustration_level = Column(Float, nullable=True)
+
+    # Relations STI
+    session = relationship(
+        "SimulationSession",
+        back_populates="affective_states",
+        foreign_keys=[session_id]
+    )
+    
+    # Propriétés compatibilité
+    @property
+    def learner_id(self):
+        return self.session.learner_id if self.session else None
+    
+    @property
+    def stress(self):
+        return self.stress_level
+    
+    @property
+    def confidence(self):
+        return self.confidence_level
+    
+    @property
+    def motivation(self):
+        return self.motivation_level
+    
+    @property
+    def frustration(self):
+        return self.frustration_level
+    
+    def __repr__(self):
+        return f"<LearnerAffectiveState(session={self.session_id}, motivation={self.motivation_level})>"
+
+### FILE: ./cas_clinique.py
+
+"""Modèle SQLAlchemy pour les cas cliniques."""
+from sqlalchemy import Column, Integer, String, Text, Boolean, Date, DateTime, ForeignKey, JSON, Numeric
+from sqlalchemy.sql import func
+from sqlalchemy.orm import relationship
+from sqlalchemy.dialects.postgresql import ARRAY
+from app.core.database import Base
+
+
+class CasCliniqueEnrichi(Base):
+    """Cas clinique complet pour simulation."""
+    __tablename__ = "cas_cliniques_enrichis"
+
+    # Colonnes
+    id = Column(Integer, primary_key=True, index=True)
+    code_fultang = Column(String(100), unique=True, index=True, nullable=True)
+    hash_integrite = Column(String(64), nullable=True)
+    pathologie_principale_id = Column(Integer, ForeignKey("pathologies.id"), index=True, nullable=True)
+    donnees_brutes = Column(JSON, nullable=True)
+    presentation_clinique = Column(JSON, nullable=False)
+    donnees_paracliniques = Column(JSON, nullable=True)
+    evolution_patient = Column(Text, nullable=True)
+    images_associees_ids = Column(ARRAY(Integer), nullable=True)
+    sons_associes_ids = Column(ARRAY(Integer), nullable=True)
+    medicaments_prescrits = Column(JSON, nullable=True)
+    niveau_difficulte = Column(Integer, nullable=True)
+    duree_estimee_resolution_min = Column(Integer, nullable=True)
+    objectifs_apprentissage = Column(JSON, nullable=True)
+    competences_requises = Column(JSON, nullable=True)
+    valide_expert = Column(Boolean, nullable=True)
+    date_validation = Column(Date, nullable=True)
+    qualite_donnees = Column(Integer, nullable=True)
+    nb_utilisations = Column(Integer, nullable=True)
+    note_moyenne_apprenants = Column(Numeric(3, 2), nullable=True)
+    taux_succes_diagnostic = Column(Numeric(5, 2), nullable=True)
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+    updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
+    pathologies_secondaires_ids = Column(ARRAY(Integer), nullable=True)
+    expert_validateur_id = Column(Integer, nullable=True)
+
+    # Relations STI
+    pathologie_principale = relationship(
+        "Pathologie",
+        foreign_keys=[pathologie_principale_id]
+    )
+    
+    sessions = relationship(
+        "SimulationSession",
+        back_populates="cas_clinique",
+        foreign_keys="[SimulationSession.cas_clinique_id]"
+    )
+    
+    def __repr__(self):
+        return f"<CasCliniqueEnrichi(id={self.id}, code={self.code_fultang})>"
+
+### FILE: ./prerequis_competence.py
+
+"""Modèle SQLAlchemy pour les prérequis entre compétences."""
+from sqlalchemy import Column, Integer, ForeignKey, String, Numeric
+from sqlalchemy.orm import relationship
+from app.core.database import Base
+
+
+class PrerequisCompetence(Base):
+    """Relation de prérequis entre deux compétences."""
+    __tablename__ = "prerequis_competences"
+
+    # Colonnes
+    id = Column(Integer, primary_key=True, index=True)
+    competence_id = Column(Integer, ForeignKey("competences_cliniques.id"), nullable=False)
+    prerequis_id = Column(Integer, ForeignKey("competences_cliniques.id"), nullable=False)
+    type_relation = Column(String(50), nullable=True)
+    force_relation = Column(Numeric(3, 2), nullable=True)
+
+    # Relations STI
+    competence = relationship(
+        "CompetenceClinique",
+        foreign_keys=[competence_id],
+        back_populates="prerequis_as_competence"
+    )
+    
+    prerequis = relationship(
+        "CompetenceClinique",
+        foreign_keys=[prerequis_id],
+        back_populates="prerequis_as_prerequis"
+    )
+    
+    def __repr__(self):
+        return f"<PrerequisCompetence(comp={self.competence_id}, prereq={self.prerequis_id})>"
+
+### FILE: ./medicament.py
+
+"""Modèle SQLAlchemy pour les médicaments."""
+from sqlalchemy import Column, Integer, String, Text, DateTime, JSON
+from sqlalchemy.sql import func
+from app.core.database import Base
+
+
+class Medicament(Base):
+    """Médicament."""
+    __tablename__ = "medicaments"
+
+    # Colonnes
+    id = Column(Integer, primary_key=True, index=True)
+    nom_commercial = Column(String(255), index=True, nullable=True)
+    dci = Column(String(255), index=True, nullable=False)
+    classe_therapeutique = Column(String(255), index=True, nullable=True)
+    forme_galenique = Column(String(100), nullable=True)
+    dosage = Column(String(100), nullable=True)
+    voie_administration = Column(String(100), nullable=True)
+    mecanisme_action = Column(Text, nullable=True)
+    indications = Column(JSON, nullable=True)
+    contre_indications = Column(JSON, nullable=True)
+    effets_secondaires = Column(JSON, nullable=True)
+    interactions_medicamenteuses = Column(JSON, nullable=True)
+    precautions_emploi = Column(Text, nullable=True)
+    posologie_standard = Column(JSON, nullable=True)
+    disponibilite_cameroun = Column(String(50), nullable=True)
+    cout_moyen_fcfa = Column(Integer, nullable=True)
+    statut_prescription = Column(String(50), nullable=True)
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+    updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
+
+    def __repr__(self):
+        return f"<Medicament(id={self.id}, dci={self.dci})>"
+
+### FILE: ./concept.py
+
+"""Wrapper de compatibilité."""
+from app.models.competence_clinique import CompetenceClinique
+Concept = CompetenceClinique
+
+### FILE: ./simulation_session.py
+
+"""Modèle SQLAlchemy pour les sessions de simulation."""
+from sqlalchemy import Column, Integer, String, Float, DateTime, ForeignKey, JSON
+from sqlalchemy.sql import func
+from sqlalchemy.orm import relationship
+from sqlalchemy.dialects.postgresql import UUID
+import uuid
+from app.core.database import Base
+
+
+class SimulationSession(Base):
+    """Session de simulation de cas clinique."""
+    __tablename__ = "simulation_sessions"
+
+    # Colonnes
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    learner_id = Column(Integer, ForeignKey("learners.id"), nullable=False)
+    cas_clinique_id = Column(Integer, ForeignKey("cas_cliniques_enrichis.id"), nullable=False)
+    start_time = Column(DateTime(timezone=True), server_default=func.now())
+    end_time = Column(DateTime(timezone=True), nullable=True)
+    score_final = Column(Float, nullable=True)
+    temps_total = Column(Integer, nullable=True)
+    cout_virtuel_genere = Column(Integer, nullable=True)
+    statut = Column(String(50), nullable=True)
+    raison_fin = Column(String(100), nullable=True)
+    current_stage = Column(String(50), nullable=True)
+    context_state = Column(JSON, nullable=True)
+
+    # Relations STI
+    learner = relationship(
+        "Learner",
+        back_populates="simulation_sessions",
+        foreign_keys=[learner_id]
+    )
+    
+    cas_clinique = relationship(
+        "CasCliniqueEnrichi",
+        back_populates="sessions",
+        foreign_keys=[cas_clinique_id]
+    )
+    
+    interaction_logs = relationship(
+        "InteractionLog",
+        back_populates="session",
+        foreign_keys="[InteractionLog.session_id]"
+    )
+    
+    affective_states = relationship(
+        "LearnerAffectiveState",
+        back_populates="session",
+        foreign_keys="[LearnerAffectiveState.session_id]"
+    )
+    
+    def __repr__(self):
+        return f"<SimulationSession(id={self.id}, learner={self.learner_id}, status={self.statut})>"
+
+### FILE: ./learner.py
+
+"""Modèle SQLAlchemy pour les apprenants."""
+from sqlalchemy import Column, Integer, String, DateTime
+from sqlalchemy.sql import func
+from sqlalchemy.orm import relationship
+from app.core.database import Base
+
+
+class Learner(Base):
+    """Apprenant du système STI."""
+    __tablename__ = "learners"
+
+    # Colonnes
+    id = Column(Integer, primary_key=True, index=True)
+    matricule = Column(String(50), unique=True, index=True, nullable=True)
+    nom = Column(String(255), nullable=True)
+    email = Column(String(255), unique=True, index=True, nullable=True)
+    niveau_etudes = Column(String(50), nullable=True)
+    specialite_visee = Column(String(100), nullable=True)
+    langue_preferee = Column(String(10), nullable=True)
+    date_inscription = Column(DateTime(timezone=True), server_default=func.now())
+
+    # Relations STI
+    competency_masteries = relationship(
+        "LearnerCompetencyMastery",
+        back_populates="learner",
+        foreign_keys="[LearnerCompetencyMastery.learner_id]"
+    )
+    
+    simulation_sessions = relationship(
+        "SimulationSession",
+        back_populates="learner",
+        foreign_keys="[SimulationSession.learner_id]"
+    )
+    
+    behaviors = relationship(
+        "LearnerBehavior",
+        back_populates="learner",
+        uselist=False
+    )
+    
+    cognitive_profile = relationship(
+        "LearnerCognitiveProfile",
+        back_populates="learner",
+        uselist=False
+    )
+
+    # Propriétés de compatibilité
+    @property
+    def first_name(self):
+        return self.nom.split()[0] if self.nom else ""
+    
+    @property
+    def last_name(self):
+        parts = self.nom.split() if self.nom else []
+        return " ".join(parts[1:]) if len(parts) > 1 else ""
+    
+    @property
+    def level(self):
+        return self.niveau_etudes
+    
+    @property
+    def field_of_study(self):
+        return self.specialite_visee
+    
+    @property
+    def created_at(self):
+        return self.date_inscription
+    
+    def __repr__(self):
+        return f"<Learner(id={self.id}, matricule={self.matricule})>"
+
+### FILE: ./__init__.py
+
+"""Modèles SQLAlchemy."""
+from app.models.learner import Learner
+from app.models.learning_history import LearningHistory
+from app.models.concept import Concept
+from Backend.app.models.learner_competency_mastery import LearnerKnowledge
+from app.models.learner_performance import LearnerPerformance
+from app.models.learner_behavior import LearnerBehavior
+from app.models.learner_cognitive import LearnerCognitiveProfile
+from app.models.learner_affective import LearnerAffectiveState
+
+__all__ = [
+    "Learner",
+    "LearningHistory",
+    "Concept",
+    "LearnerKnowledge",
+    "LearnerPerformance",
+    "LearnerBehavior",
+    "LearnerCognitiveProfile",
+    "LearnerAffectiveState"
+]
+
+
+### FILE: ./learner_knowledge.py
+
+"""Wrapper de compatibilité."""
+from app.models.competence_clinique import CompetenceClinique
+Concept = CompetenceClinique
+
+### FILE: ./learner_behavior.py
+
+"""Modèle SQLAlchemy pour le comportement de l'apprenant."""
+from sqlalchemy import Column, Integer, ForeignKey, Float, DateTime
+from sqlalchemy.sql import func
+from sqlalchemy.orm import relationship
+from app.core.database import Base
+
+
+class LearnerBehavior(Base):
+    """Enregistre les indicateurs comportementaux d'un apprenant."""
+    __tablename__ = "learner_behaviors"
+
+    # Colonnes (100% conformes à la base STI)
+    id = Column(Integer, primary_key=True, index=True)
+    learner_id = Column(Integer, ForeignKey("learners.id"), nullable=False)
+    sessions_count = Column(Integer, nullable=True)
+    activities_count = Column(Integer, nullable=True)
+    total_time_spent = Column(Integer, nullable=True)
+    engagement_score = Column(Float, nullable=True)
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+    updated_at = Column(DateTime(timezone=True), onupdate=func.now())
+
+    # Relations (100% conformes à la base STI)
+    learner = relationship("Learner", back_populates="behaviors")
+    
+    def __repr__(self):
+        return f"<LearnerBehavior(learner_id={self.learner_id}, engagement={self.engagement_score})>""""Modèle SQLAlchemy pour le comportement."""
+from sqlalchemy import Column, Integer, ForeignKey, Float, DateTime
+from sqlalchemy.sql import func
+from sqlalchemy.orm import relationship
+from app.core.database import Base
+
+
+class LearnerBehavior(Base):
+    """Indicateurs comportementaux d'un apprenant."""
+    __tablename__ = "learner_behaviors"
+
+    # Colonnes
+    id = Column(Integer, primary_key=True, index=True)
+    learner_id = Column(Integer, ForeignKey("learners.id"), nullable=False)
+    sessions_count = Column(Integer, nullable=True)
+    activities_count = Column(Integer, nullable=True)
+    total_time_spent = Column(Integer, nullable=True)
+    engagement_score = Column(Float, nullable=True)
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+    updated_at = Column(DateTime(timezone=True), onupdate=func.now())
+
+    # Relations STI
+    learner = relationship(
+        "Learner",
+        back_populates="behaviors",
+        foreign_keys=[learner_id]
+    )
+    
+    def __repr__(self):
+        return f"<LearnerBehavior(learner={self.learner_id}, engagement={self.engagement_score})>"
+
+### FILE: ./symptome.py
+
+"""Modèle SQLAlchemy pour les symptômes."""
+from sqlalchemy import Column, Integer, String, Text, Boolean, DateTime, JSON
+from sqlalchemy.sql import func
+from app.core.database import Base
+
+
+class Symptome(Base):
+    """Symptôme médical."""
+    __tablename__ = "symptomes"
+
+    # Colonnes
+    id = Column(Integer, primary_key=True, index=True)
+    nom = Column(String(255), unique=True, index=True, nullable=False)
+    nom_local = Column(String(255), nullable=True)
+    categorie = Column(String(100), index=True, nullable=True)
+    type_symptome = Column(String(50), nullable=True)
+    description = Column(Text, nullable=True)
+    questions_anamnese = Column(JSON, nullable=True)
+    signes_alarme = Column(Boolean, nullable=False)
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+    updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
+
+    def __repr__(self):
+        return f"<Symptome(id={self.id}, nom={self.nom})>"
+
+### FILE: ./learner_cognitive.py
+
+"""Modèle SQLAlchemy pour le profil cognitif."""
+from sqlalchemy import Column, Integer, Float, ForeignKey, Boolean
+from sqlalchemy.orm import relationship
+from app.core.database import Base
+
+
+class LearnerCognitiveProfile(Base):
+    """Profil cognitif d'un apprenant."""
+    __tablename__ = "learner_cognitive_profiles"
+
+    # Colonnes
+    id = Column(Integer, primary_key=True, index=True)
+    learner_id = Column(Integer, ForeignKey("learners.id"), unique=True, nullable=True)
+    vitesse_assimilation = Column(Float, nullable=True)
+    capacite_memoire_travail = Column(Float, nullable=True)
+    tendance_impulsivite = Column(Float, nullable=True)
+    prefer_visual = Column(Boolean, nullable=True)
+
+    # Relations STI
+    learner = relationship(
+        "Learner",
+        back_populates="cognitive_profile",
+        foreign_keys=[learner_id]
+    )
+    
+    # Propriétés compatibilité
+    @property
+    def learning_style(self):
+        if self.prefer_visual is True:
+            return "visuel"
+        elif self.prefer_visual is False:
+            return "auditif"
+        return None
+    
+    @property
+    def learning_speed(self):
+        return self.vitesse_assimilation
+    
+    @property
+    def autonomy_level(self):
+        if self.tendance_impulsivite is not None:
+            return 1.0 - self.tendance_impulsivite
+        return None
+    
+    def __repr__(self):
+        return f"<LearnerCognitiveProfile(learner={self.learner_id})>"
+
+### FILE: ./pathologie.py
+
+"""Modèle SQLAlchemy pour les pathologies."""
+from sqlalchemy import Column, Integer, String, Text, Numeric, DateTime, JSON
+from sqlalchemy.sql import func
+from app.core.database import Base
+
+
+class Pathologie(Base):
+    """Pathologie médicale."""
+    __tablename__ = "pathologies"
+
+    # Colonnes
+    id = Column(Integer, primary_key=True, index=True)
+    code_icd10 = Column(String(20), unique=True, index=True, nullable=True)
+    nom_fr = Column(String(255), index=True, nullable=False)
+    nom_en = Column(String(255), nullable=True)
+    nom_local = Column(String(255), nullable=True)
+    categorie = Column(String(100), index=True, nullable=True)
+    prevalence_cameroun = Column(Numeric(5, 2), nullable=True)
+    niveau_gravite = Column(Integer, nullable=True)
+    description = Column(Text, nullable=True)
+    physiopathologie = Column(Text, nullable=True)
+    evolution_naturelle = Column(Text, nullable=True)
+    complications = Column(JSON, nullable=True)
+    facteurs_risque = Column(JSON, nullable=True)
+    prevention = Column(Text, nullable=True)
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+    updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
+    
+    def __repr__(self):
+        return f"<Pathologie(id={self.id}, icd10={self.code_icd10}, nom={self.nom_fr})>"
+
+### FILE: ./learner_performance.py
+
+
+
+### FILE: ./interaction_log.py
+
+"""Modèle SQLAlchemy pour les logs d'interaction."""
+from sqlalchemy import Column, Integer, String, Float, DateTime, ForeignKey, JSON, Boolean
+from sqlalchemy.sql import func
+from sqlalchemy.orm import relationship
+from sqlalchemy.dialects.postgresql import UUID
+from app.core.database import Base
+
+
+class InteractionLog(Base):
+    """Action détaillée de l'apprenant dans une session."""
+    __tablename__ = "interaction_logs"
+
+    # Colonnes
+    id = Column(Integer, primary_key=True, index=True)
+    session_id = Column(UUID(as_uuid=True), ForeignKey("simulation_sessions.id"), nullable=True)
+    timestamp = Column(DateTime(timezone=True), server_default=func.now())
+    action_category = Column(String(50), nullable=True)
+    action_type = Column(String(100), nullable=True)
+    action_content = Column(JSON, nullable=True)
+    response_latency = Column(Integer, nullable=True)
+    charge_cognitive_estimee = Column(Float, nullable=True)
+    est_pertinent = Column(Boolean, nullable=True)
+
+    # Relations STI
+    session = relationship(
+        "SimulationSession",
+        back_populates="interaction_logs",
+        foreign_keys=[session_id]
+    )
+    
+    def __repr__(self):
+        return f"<InteractionLog(id={self.id}, session={self.session_id}, action={self.action_type})>"
+
+### FILE: ./learning_history.py
+

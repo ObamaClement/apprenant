@@ -1,107 +1,44 @@
-"""Routes FastAPI pour le profil cognitif de l'apprenant."""
-from fastapi import APIRouter, Depends, HTTPException
-from sqlalchemy.orm import Session
-from app.models.learner_cognitive import LearnerCognitiveProfile
-from app.models.learner import Learner
-from app.schemas.learner_cognitive import (
-    LearnerCognitiveCreate,
-    LearnerCognitiveResponse
-)
-from app.core.deps import get_db
-
-router = APIRouter(prefix="/cognitive", tags=["Learner Cognitive"])
+"""Modèle SQLAlchemy pour le profil cognitif de l'apprenant."""
+from sqlalchemy import Column, Integer, Float, ForeignKey, Boolean
+from sqlalchemy.orm import relationship
+from app.core.database import Base
 
 
-@router.post("/", response_model=LearnerCognitiveResponse)
-def create_cognitive_profile(
-    data: LearnerCognitiveCreate,
-    db: Session = Depends(get_db)
-):
-    """Créer un profil cognitif pour un apprenant."""
-    learner = db.query(Learner).get(data.learner_id)
-    if not learner:
-        raise HTTPException(status_code=404, detail="Apprenant non trouvé")
-    
-    # Vérifier si un profil existe déjà
-    existing = db.query(LearnerCognitiveProfile).filter(
-        LearnerCognitiveProfile.learner_id == data.learner_id
-    ).first()
-    
-    if existing:
-        raise HTTPException(status_code=400, detail="Un profil cognitif existe déjà pour cet apprenant")
-    
-    profile = LearnerCognitiveProfile(**data.dict())
-    db.add(profile)
-    db.commit()
-    db.refresh(profile)
-    return profile
+class LearnerCognitiveProfile(Base):
+    """Enregistre le profil cognitif d'un apprenant - Compatible STI."""
+    __tablename__ = "learner_cognitive_profiles"
 
+    id = Column(Integer, primary_key=True, index=True)
+    learner_id = Column(Integer, ForeignKey("learners.id"), unique=True, nullable=True)
 
-@router.get("/{learner_id}", response_model=LearnerCognitiveResponse)
-def get_cognitive_profile(
-    learner_id: int,
-    db: Session = Depends(get_db)
-):
-    """Récupérer le profil cognitif d'un apprenant."""
-    learner = db.query(Learner).get(learner_id)
-    if not learner:
-        raise HTTPException(status_code=404, detail="Apprenant non trouvé")
-    
-    profile = db.query(LearnerCognitiveProfile).filter(
-        LearnerCognitiveProfile.learner_id == learner_id
-    ).first()
-    
-    if not profile:
-        raise HTTPException(status_code=404, detail="Profil cognitif non trouvé")
-    
-    return profile
+    # Colonnes de la base STI (conformes au schéma déployé)
+    vitesse_assimilation = Column(Float, nullable=True)
+    capacite_memoire_travail = Column(Float, nullable=True)
+    tendance_impulsivite = Column(Float, nullable=True)
+    prefer_visual = Column(Boolean, nullable=True)
 
-
-@router.put("/{learner_id}", response_model=LearnerCognitiveResponse)
-def update_cognitive_profile(
-    learner_id: int,
-    data: LearnerCognitiveCreate,
-    db: Session = Depends(get_db)
-):
-    """Mettre à jour le profil cognitif d'un apprenant."""
-    learner = db.query(Learner).get(learner_id)
-    if not learner:
-        raise HTTPException(status_code=404, detail="Apprenant non trouvé")
+    # Relation
+    learner = relationship("Learner", back_populates="cognitive_profile")
     
-    profile = db.query(LearnerCognitiveProfile).filter(
-        LearnerCognitiveProfile.learner_id == learner_id
-    ).first()
+    # Propriétés de compatibilité pour l'ancien code
+    @property
+    def learning_style(self):
+        """Compatibilité : déduit le style d'apprentissage"""
+        if self.prefer_visual:
+            return "visuel"
+        return "auditif"
     
-    if not profile:
-        raise HTTPException(status_code=404, detail="Profil cognitif non trouvé")
+    @property
+    def learning_speed(self):
+        """Compatibilité : alias pour vitesse_assimilation"""
+        return self.vitesse_assimilation
     
-    profile.learning_style = data.learning_style
-    profile.learning_speed = data.learning_speed
-    profile.autonomy_level = data.autonomy_level
+    @property
+    def autonomy_level(self):
+        """Compatibilité : calculé depuis tendance_impulsivite"""
+        if self.tendance_impulsivite is not None:
+            return 1.0 - self.tendance_impulsivite  # Autonomie inverse de l'impulsivité
+        return None
     
-    db.commit()
-    db.refresh(profile)
-    return profile
-
-
-@router.delete("/{learner_id}")
-def delete_cognitive_profile(
-    learner_id: int,
-    db: Session = Depends(get_db)
-):
-    """Supprimer le profil cognitif d'un apprenant."""
-    learner = db.query(Learner).get(learner_id)
-    if not learner:
-        raise HTTPException(status_code=404, detail="Apprenant non trouvé")
-    
-    profile = db.query(LearnerCognitiveProfile).filter(
-        LearnerCognitiveProfile.learner_id == learner_id
-    ).first()
-    
-    if not profile:
-        raise HTTPException(status_code=404, detail="Profil cognitif non trouvé")
-    
-    db.delete(profile)
-    db.commit()
-    
-    return {"message": "Profil cognitif supprimé avec succès"}
+    def __repr__(self):
+        return f"<LearnerCognitiveProfile(id={self.id}, learner_id={self.learner_id})>"

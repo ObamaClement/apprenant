@@ -1,316 +1,383 @@
-"""Moteur d'adaptation intelligente - Orchestration des modèles."""
+"""Moteur d'adaptation intelligente - Orchestration complète."""
 from sqlalchemy.orm import Session
-from app.models.learner_knowledge import LearnerKnowledge
-from app.models.learner_performance import LearnerPerformance
+from sqlalchemy.sql import func
+from typing import List, Dict, Any
+from uuid import UUID
+from app.models.simulation_session import SimulationSession
+from app.models.learner_competency_mastery import LearnerCompetencyMastery
 from app.models.learner_affective import LearnerAffectiveState
 from app.models.learner_behavior import LearnerBehavior
-from app.models.concept import Concept
-from app.services.knowledge_update_service import update_mastery
+from app.models.cas_clinique import CasCliniqueEnrichi
+from app.services.knowledge_inference_service import (
+    infer_knowledge_from_interaction,
+    extract_competences_from_actions
+)
 from app.services.affective_service import (
     update_affective_state,
-    get_affective_label,
-    detect_frustration,
-    detect_demotivation
+    record_affective_state,
+    get_latest_affective_state,
+    get_affective_label
 )
-from app.services.performance_service import performance_indicator
+from app.services.simulation_session_service import complete_session
+from app.services.interaction_log_service import create_interactions_batch
 
 
-def process_new_performance(
+def process_simulation_completion(
     db: Session,
-    learner_id: int,
-    concept_id: int,
-    score: float,
-    activity_type: str = "exercice",
-    time_spent: int = None
-) -> dict:
+    session_id: UUID,
+    actions: List[Dict[str, Any]],
+    diagnostic_propose: str,
+    diagnostic_correct: bool
+) -> Dict[str, Any]:
     """
-    Orchestration globale après une nouvelle performance.
+    Orchestration complète après une simulation de cas clinique.
     
     Flux:
-    1. Enregistrer la performance
-    2. Mettre à jour le niveau de maîtrise
-    3. Mettre à jour l'état affectif
-    4. Analyser le comportement
-    5. Générer une recommandation pédagogique
+    1. Enregistrer toutes les actions (InteractionLog)
+    2. Extraire et mettre à jour les maîtrises de compétences (BKT)
+    3. Calculer le score final de la session
+    4. Mettre à jour l'état affectif
+    5. Mettre à jour le comportement
+    6. Générer une recommandation pédagogique
+    
+    Args:
+        db: Session de base de données
+        session_id: ID de la session
+        actions: Liste des actions effectuées
+        diagnostic_propose: Diagnostic proposé par l'apprenant
+        diagnostic_correct: Le diagnostic était-il correct ?
+    
+    Returns:
+        Résultats complets de l'adaptation
+    """
+    # Récupérer la session
+    session = db.query(SimulationSession).filter(SimulationSession.id == session_id).first()
+    if not session:
+        raise ValueError(f"Session {session_id} non trouvée")
+    
+    learner_id = session.learner_id
+    
+    # 1️⃣ Enregistrer les actions (batch)
+    if actions:
+        create_interactions_batch(db, session_id, actions)
+    
+    # 2️⃣ Extraire les compétences sollicitées et leurs scores
+    competence_scores = extract_competences_from_actions(db, session_id)
+    
+    # Mettre à jour les maîtrises (BKT)
+    updated_masteries = []
+    for comp_id, scores in competence_scores.items():
+        avg_score = sum(scores) / len(scores) if scores else 0
+        mastery = infer_knowledge_from_interaction(db, learner_id, comp_id, avg_score)
+        updated_masteries.append({
+            "competence_id": comp_id,
+            "mastery_level": round(mastery.mastery_level or 0, 2),
+            "confidence": round(mastery.confidence or 0, 2)
+        })
+    
+    # 3️⃣ Calculer le score final de la session
+    score_final = _calculate_session_score(
+        competence_scores,
+        diagnostic_correct,
+        actions
+    )
+    
+    # 4️⃣ Terminer la session
+    session = complete_session(db, session_id, score_final, "completed", diagnostic_correct)
+    
+    # 5️⃣ Mettre à jour l'état affectif
+    affective_result = _update_session_affective_state(db, session_id, learner_id, score_final)
+    
+    # 6️⃣ Mettre à jour le comportement
+    _update_learner_behavior(db, learner_id, session.temps_total or 0)
+    
+    # 7️⃣ Générer la recommandation pédagogique
+    recommendation = _generate_pedagogical_recommendation(
+        db,
+        learner_id,
+        score_final,
+        updated_masteries,
+        affective_result
+    )
+    
+    # 8️⃣ Déterminer l'action suivante
+    next_action = _get_next_action(
+        score_final,
+        updated_masteries,
+        affective_result
+    )
+    
+    return {
+        "session_id": str(session_id),
+        "learner_id": learner_id,
+        "cas_clinique_id": session.cas_clinique_id,
+        "score_final": score_final,
+        "diagnostic_correct": diagnostic_correct,
+        "temps_total": session.temps_total,
+        "competences_updated": updated_masteries,
+        "affective_state": affective_result,
+        "recommendation": recommendation,
+        "next_action": next_action
+    }
+
+
+def _calculate_session_score(
+    competence_scores: Dict[int, List[float]],
+    diagnostic_correct: bool,
+    actions: List[Dict[str, Any]]
+) -> float:
+    """
+    Calculer le score final d'une session.
+    
+    Args:
+        competence_scores: Scores par compétence
+        diagnostic_correct: Diagnostic correct ?
+        actions: Liste des actions
+    
+    Returns:
+        Score final (0-100)
+    """
+    if not competence_scores:
+        # Si pas de compétences évaluées, se baser sur le diagnostic
+        return 80.0 if diagnostic_correct else 20.0
+    
+    # Calculer la moyenne des scores des compétences
+    all_scores = []
+    for scores in competence_scores.values():
+        all_scores.extend(scores)
+    
+    avg_competence_score = sum(all_scores) / len(all_scores) if all_scores else 50.0
+    
+    # Pondération : 60% compétences, 40% diagnostic
+    diagnostic_score = 100.0 if diagnostic_correct else 0.0
+    final_score = (avg_competence_score * 0.6) + (diagnostic_score * 0.4)
+    
+    return round(min(100.0, max(0.0, final_score)), 2)
+
+
+def _update_session_affective_state(
+    db: Session,
+    session_id: UUID,
+    learner_id: int,
+    score: float
+) -> Dict[str, Any]:
+    """
+    Mettre à jour l'état affectif basé sur la performance de la session.
+    
+    Args:
+        db: Session de base de données
+        session_id: ID de la session
+        learner_id: ID de l'apprenant
+        score: Score final de la session
+    
+    Returns:
+        État affectif mis à jour
+    """
+    # Récupérer le dernier état affectif (si existe)
+    latest = get_latest_affective_state(db, session_id)
+    
+    if latest:
+        # Mettre à jour basé sur l'état précédent
+        motivation, frustration, confidence, stress = update_affective_state(
+            latest.motivation_level or 0.5,
+            latest.frustration_level or 0.0,
+            latest.confidence_level or 0.5,
+            latest.stress_level or 0.0,
+            score
+        )
+    else:
+        # Créer un état initial basé sur le score
+        motivation, frustration, confidence, stress = update_affective_state(
+            0.5, 0.0, 0.5, 0.0, score
+        )
+    
+    # Enregistrer le nouvel état
+    new_affective = record_affective_state(
+        db,
+        session_id,
+        stress,
+        confidence,
+        motivation,
+        frustration
+    )
+    
+    return {
+        "motivation": motivation,
+        "frustration": frustration,
+        "confidence": confidence,
+        "stress": stress,
+        "label": get_affective_label(motivation, frustration, confidence, stress)
+    }
+
+
+def _update_learner_behavior(
+    db: Session,
+    learner_id: int,
+    session_time: int
+) -> None:
+    """
+    Mettre à jour le profil comportemental de l'apprenant.
     
     Args:
         db: Session de base de données
         learner_id: ID de l'apprenant
-        concept_id: ID du concept
-        score: Score obtenu (0-100)
-        activity_type: Type d'activité (quiz, exercice, test)
-        time_spent: Temps passé en secondes
-    
-    Returns:
-        Dictionnaire avec résultats de l'adaptation
+        session_time: Temps de la session en secondes
     """
+    from app.services.behavior_service import compute_engagement
     
-    # 1️⃣ Enregistrer la performance
-    performance = LearnerPerformance(
-        learner_id=learner_id,
-        concept_id=concept_id,
-        activity_type=activity_type,
-        score=score,
-        time_spent=time_spent,
-        attempts=1
-    )
-    db.add(performance)
-    db.flush()
-    
-    # 2️⃣ Récupérer ou créer la connaissance
-    knowledge = db.query(LearnerKnowledge).filter(
-        LearnerKnowledge.learner_id == learner_id,
-        LearnerKnowledge.concept_id == concept_id
+    # Récupérer ou créer le profil comportemental
+    behavior = db.query(LearnerBehavior).filter(
+        LearnerBehavior.learner_id == learner_id
     ).first()
-
-    concept = db.query(Concept).get(concept_id)
     
-    previous_mastery = 0.0
-    if not knowledge:
-        knowledge = LearnerKnowledge(
+    if not behavior:
+        behavior = LearnerBehavior(
             learner_id=learner_id,
-            concept_id=concept_id,
-            mastery_level=concept.p_init if concept else 0.2
+            sessions_count=0,
+            activities_count=0,
+            total_time_spent=0
         )
-        db.add(knowledge)
-        db.flush()
-    else:
-        previous_mastery = knowledge.mastery_level
+        db.add(behavior)
     
-    # 3️⃣ Mettre à jour le niveau de maîtrise
-    if concept:
-        new_mastery = update_mastery(
-            knowledge.mastery_level,
-            score,
-            p_transit=concept.p_transit,
-            p_guess=concept.p_guess,
-            p_slip=concept.p_slip,
-        )
-    else:
-        new_mastery = update_mastery(knowledge.mastery_level, score)
-    knowledge.mastery_level = new_mastery
+    # Mettre à jour les compteurs
+    behavior.sessions_count = (behavior.sessions_count or 0) + 1
+    behavior.activities_count = (behavior.activities_count or 0) + 1  # Une session = une activité
+    behavior.total_time_spent = (behavior.total_time_spent or 0) + session_time
     
-    # 4️⃣ Récupérer ou créer l'état affectif
-    affective = db.query(LearnerAffectiveState).filter(
-        LearnerAffectiveState.learner_id == learner_id
-    ).first()
-    
-    affective_changes = {}
-    if affective:
-        old_affective = {
-            "motivation": affective.motivation,
-            "frustration": affective.frustration,
-            "confidence": affective.confidence,
-            "stress": affective.stress
-        }
-        
-        # Mettre à jour l'état affectif
-        motivation, frustration, confidence, stress = update_affective_state(
-            affective.motivation,
-            affective.frustration,
-            affective.confidence,
-            affective.stress,
-            score,
-            previous_score=None
-        )
-        
-        affective.motivation = motivation
-        affective.frustration = frustration
-        affective.confidence = confidence
-        affective.stress = stress
-        
-        affective_changes = {
-            "motivation": {"old": old_affective["motivation"], "new": motivation},
-            "frustration": {"old": old_affective["frustration"], "new": frustration},
-            "confidence": {"old": old_affective["confidence"], "new": confidence},
-            "stress": {"old": old_affective["stress"], "new": stress}
-        }
-    else:
-        # Créer un nouvel état affectif initial
-        affective = LearnerAffectiveState(learner_id=learner_id)
-        
-        # Mettre à jour basé sur le score
-        motivation, frustration, confidence, stress = update_affective_state(
-            0.5, 0.0, 0.5, 0.0, score
-        )
-        
-        affective.motivation = motivation
-        affective.frustration = frustration
-        affective.confidence = confidence
-        affective.stress = stress
-        
-        db.add(affective)
-        db.flush()
-    
-    # 5️⃣ Générer la recommandation pédagogique
-    recommendation = _pedagogical_decision(
-        new_mastery,
-        affective,
-        score
+    # Recalculer le score d'engagement
+    behavior.engagement_score = compute_engagement(
+        behavior.sessions_count,
+        behavior.activities_count,
+        behavior.total_time_spent
     )
     
-    # 6️⃣ Récupérer le concept
-    concept_name = concept.name if concept else "Unknown"
-    
-    # Commit toutes les modifications
     db.commit()
-    
-    return {
-        "learner_id": learner_id,
-        "concept_id": concept_id,
-        "concept_name": concept_name,
-        "score": score,
-        "performance_indicator": performance_indicator(score),
-        "knowledge": {
-            "previous_mastery": round(previous_mastery, 2),
-            "new_mastery": round(new_mastery, 2),
-            "progress": round(new_mastery - previous_mastery, 2)
-        },
-        "affective": {
-            "motivation": affective.motivation,
-            "frustration": affective.frustration,
-            "confidence": affective.confidence,
-            "stress": affective.stress,
-            "label": get_affective_label(
-                affective.motivation,
-                affective.frustration,
-                affective.confidence,
-                affective.stress
-            ),
-            "changes": affective_changes
-        },
-        "recommendation": recommendation,
-        "next_action": _get_next_action(new_mastery, affective, score)
-    }
 
 
-def _pedagogical_decision(
-    mastery_level: float,
-    affective: LearnerAffectiveState,
-    score: float
+def _generate_pedagogical_recommendation(
+    db: Session,
+    learner_id: int,
+    score: float,
+    masteries: List[Dict],
+    affective: Dict
 ) -> str:
     """
-    Prendre une décision pédagogique basée sur les modèles.
+    Générer une recommandation pédagogique personnalisée.
     
     Args:
-        mastery_level: Niveau de maîtrise (0-1)
+        db: Session de base de données
+        learner_id: ID de l'apprenant
+        score: Score obtenu
+        masteries: Maîtrises de compétences
         affective: État affectif
-        score: Score obtenu (0-100)
     
     Returns:
-        Recommandation pédagogique
+        Recommandation textuelle
     """
+    # Calculer le niveau moyen de maîtrise
+    if masteries:
+        avg_mastery = sum(m["mastery_level"] for m in masteries) / len(masteries)
+    else:
+        avg_mastery = 0.5
     
-    # Cas 1: Très faible maîtrise (< 0.3)
-    if mastery_level < 0.3:
-        if affective.frustration > 0.7:
-            return "Revoir le concept avec des exemples très guidés et encourager l'apprenant"
-        return "Revoir le cours avec des exemples guidés et des exercices simples"
+    # Récupérer l'état affectif
+    frustration = affective.get("frustration", 0.0)
+    motivation = affective.get("motivation", 0.5)
+    confidence = affective.get("confidence", 0.5)
     
-    # Cas 2: Maîtrise faible (0.3-0.5)
-    if mastery_level < 0.5:
-        if affective.frustration > 0.6:
-            return "Proposer une activité plus simple avec beaucoup de soutien"
-        if score < 40:
-            return "Proposer des exercices supplémentaires avec guidance progressive"
-        return "Proposer des exercices de consolidation"
+    # Décision pédagogique basée sur le score et l'état
+    if score < 40:
+        if frustration > 0.7:
+            return "Score faible avec forte frustration. Recommandation : Revoir les concepts de base avec des cas très guidés et beaucoup d'encouragements. Prendre une pause si nécessaire."
+        else:
+            return "Score faible. Recommandation : Reprendre les fondamentaux avec des cas de niveau 1 et un tutorat renforcé."
     
-    # Cas 3: Maîtrise moyenne (0.5-0.7)
-    if mastery_level < 0.7:
-        if affective.stress > 0.6:
-            return "Proposer un exercice standard avec moins de pression"
-        if score >= 70:
-            return "Proposer des exercices plus complexes pour progresser"
-        return "Continuer avec des exercices standard"
+    elif score < 60:
+        if avg_mastery < 0.4:
+            return "Score moyen avec maîtrise faible. Recommandation : Se concentrer sur les compétences faibles identifiées avec des exercices ciblés."
+        else:
+            return "Score moyen. Recommandation : Continuer à pratiquer sur des cas de même niveau pour consolider les acquis."
     
-    # Cas 4: Bonne maîtrise (0.7-0.85)
-    if mastery_level < 0.85:
-        if affective.confidence > 0.8:
-            return "Proposer des exercices avancés pour consolider la maîtrise"
-        return "Proposer des exercices intermédiaires"
+    elif score < 80:
+        if confidence < 0.5:
+            return "Bon score mais confiance faible. Recommandation : Renforcer la confiance avec plus de pratique sur le même niveau avant de progresser."
+        else:
+            return "Bonne performance ! Recommandation : Prêt pour des cas légèrement plus complexes. Continuer sur cette dynamique."
     
-    # Cas 5: Excellente maîtrise (>= 0.85)
-    if affective.motivation > 0.8:
-        return "Proposer des défis avancés et des extensions du concept"
-    return "Proposer des applications pratiques du concept"
+    else:  # score >= 80
+        if avg_mastery >= 0.8 and motivation > 0.7:
+            return "Excellente performance avec forte maîtrise ! Recommandation : Passer au niveau supérieur et explorer des cas plus complexes ou des spécialisations."
+        else:
+            return "Excellente performance ! Recommandation : Consolider cette maîtrise avec quelques cas similaires puis progresser vers le niveau suivant."
 
 
 def _get_next_action(
-    mastery_level: float,
-    affective: LearnerAffectiveState,
-    score: float
-) -> dict:
+    score: float,
+    masteries: List[Dict],
+    affective: Dict
+) -> Dict[str, Any]:
     """
-    Déterminer l'action suivante recommandée.
+    Déterminer la prochaine action recommandée pour l'apprenant.
     
     Args:
-        mastery_level: Niveau de maîtrise
-        affective: État affectif
         score: Score obtenu
+        masteries: Maîtrises de compétences
+        affective: État affectif
     
     Returns:
-        Dictionnaire avec action recommandée
+        Dictionnaire avec l'action suivante
     """
+    # Calculer le niveau moyen de maîtrise
+    if masteries:
+        avg_mastery = sum(m["mastery_level"] for m in masteries) / len(masteries)
+    else:
+        avg_mastery = 0.5
     
-    action = {
-        "type": None,
-        "priority": "normal",
-        "description": None
+    frustration = affective.get("frustration", 0.0)
+    motivation = affective.get("motivation", 0.5)
+    confidence = affective.get("confidence", 0.5)
+    
+    # Déterminer le niveau de difficulté recommandé
+    if score < 40 or frustration > 0.7:
+        difficulty = 1
+        action_type = "revise_fundamentals"
+        message = "Reprendre les bases avec des cas simples et guidés"
+    elif score < 60 or avg_mastery < 0.4:
+        difficulty = max(1, int(avg_mastery * 5))
+        action_type = "practice_current_level"
+        message = "Continuer à pratiquer au niveau actuel pour consolider"
+    elif score < 80:
+        if confidence < 0.5:
+            difficulty = max(1, int(avg_mastery * 5))
+            action_type = "build_confidence"
+            message = "Renforcer la confiance au niveau actuel"
+        else:
+            difficulty = min(5, int(avg_mastery * 5) + 1)
+            action_type = "progress_next_level"
+            message = "Progresser vers des cas légèrement plus complexes"
+    else:
+        if avg_mastery >= 0.8 and motivation > 0.7:
+            difficulty = min(5, int(avg_mastery * 5) + 1)
+            action_type = "challenge"
+            message = "Relever des défis plus complexes"
+        else:
+            difficulty = int(avg_mastery * 5)
+            action_type = "consolidate"
+            message = "Consolider les acquis avant de progresser"
+    
+    return {
+        "action_type": action_type,
+        "recommended_difficulty": difficulty,
+        "message": message,
+        "estimated_duration_min": 20 + (difficulty * 10),
+        "support_level": "high" if frustration > 0.5 else "medium" if confidence < 0.5 else "low"
     }
-    
-    # Intervention urgente si très frustré
-    if detect_frustration(affective.frustration, threshold=0.8):
-        action["type"] = "intervention"
-        action["priority"] = "urgent"
-        action["description"] = "Contacter l'apprenant pour offrir du soutien immédiat"
-        return action
-    
-    # Intervention si frustré
-    if detect_frustration(affective.frustration, threshold=0.6):
-        action["type"] = "support"
-        action["priority"] = "high"
-        action["description"] = "Proposer une session de tutorat ou une aide supplémentaire"
-        return action
-    
-    # Intervention si démotivé
-    if detect_demotivation(affective.motivation, threshold=0.3):
-        action["type"] = "motivation"
-        action["priority"] = "high"
-        action["description"] = "Proposer des activités plus engageantes et motivantes"
-        return action
-    
-    # Progression si bon apprentissage
-    if mastery_level >= 0.8 and score >= 80:
-        action["type"] = "progression"
-        action["priority"] = "normal"
-        action["description"] = "Passer au concept suivant ou proposer des extensions"
-        return action
-    
-    # Consolidation si apprentissage en cours
-    if mastery_level >= 0.5 and score >= 60:
-        action["type"] = "consolidation"
-        action["priority"] = "normal"
-        action["description"] = "Proposer des exercices de consolidation"
-        return action
-    
-    # Remédiation si difficultés
-    if mastery_level < 0.5 or score < 50:
-        action["type"] = "remediation"
-        action["priority"] = "high"
-        action["description"] = "Proposer des activités de remédiation avec guidance"
-        return action
-    
-    # Par défaut
-    action["type"] = "standard"
-    action["priority"] = "normal"
-    action["description"] = "Continuer avec les activités standard"
-    return action
 
 
 def get_adaptation_summary(
     db: Session,
     learner_id: int
-) -> dict:
+) -> Dict[str, Any]:
     """
     Obtenir un résumé complet de l'adaptation pour un apprenant.
     
@@ -319,91 +386,114 @@ def get_adaptation_summary(
         learner_id: ID de l'apprenant
     
     Returns:
-        Résumé de l'adaptation
+        Résumé complet incluant tous les modèles
     """
+    from app.services.knowledge_inference_service import get_learner_knowledge_summary
+    from app.services.performance_service import get_learner_performance_stats
+    from app.services.behavior_service import get_behavior_profile
     
-    # Récupérer les modèles
-    knowledge_records = db.query(LearnerKnowledge).filter(
-        LearnerKnowledge.learner_id == learner_id
-    ).all()
+    # 1. Modèle de connaissances
+    knowledge = get_learner_knowledge_summary(db, learner_id)
     
-    affective = db.query(LearnerAffectiveState).filter(
-        LearnerAffectiveState.learner_id == learner_id
-    ).first()
+    # 2. Modèle de performances
+    performance = get_learner_performance_stats(db, learner_id)
     
+    # 3. Modèle comportemental
     behavior = db.query(LearnerBehavior).filter(
         LearnerBehavior.learner_id == learner_id
     ).first()
     
-    performances = db.query(LearnerPerformance).filter(
-        LearnerPerformance.learner_id == learner_id
-    ).all()
+    if behavior:
+        behavior_profile = get_behavior_profile(
+            behavior.sessions_count or 0,
+            behavior.activities_count or 0,
+            behavior.total_time_spent or 0
+        )
+    else:
+        behavior_profile = {
+            "engagement_score": 0.0,
+            "engagement_label": "Non évalué",
+            "sessions": 0,
+            "activities": 0
+        }
     
-    # Calculer les statistiques
-    avg_mastery = sum(k.mastery_level for k in knowledge_records) / len(knowledge_records) if knowledge_records else 0.0
-    avg_score = sum(p.score for p in performances) / len(performances) if performances else 0.0
+    # 4. État affectif (dernière session)
+    latest_session = db.query(SimulationSession).filter(
+        SimulationSession.learner_id == learner_id
+    ).order_by(SimulationSession.start_time.desc()).first()
+    
+    if latest_session:
+        latest_affective = get_latest_affective_state(db, latest_session.id)
+        if latest_affective:
+            affective_state = {
+                "motivation": latest_affective.motivation_level,
+                "frustration": latest_affective.frustration_level,
+                "confidence": latest_affective.confidence_level,
+                "stress": latest_affective.stress_level,
+                "label": get_affective_label(
+                    latest_affective.motivation_level or 0.5,
+                    latest_affective.frustration_level or 0.0,
+                    latest_affective.confidence_level or 0.5,
+                    latest_affective.stress_level or 0.0
+                )
+            }
+        else:
+            affective_state = {"label": "Non évalué"}
+    else:
+        affective_state = {"label": "Aucune session"}
+    
+    # 5. Statut global et recommandation
+    overall_status = _determine_overall_status(
+        knowledge.get("average_mastery", 0),
+        performance.get("average_score", 0),
+        behavior_profile.get("engagement_score", 0)
+    )
     
     return {
         "learner_id": learner_id,
-        "knowledge": {
-            "total_concepts": len(knowledge_records),
-            "average_mastery": round(avg_mastery, 2),
-            "mastered_concepts": len([k for k in knowledge_records if k.mastery_level >= 0.8])
-        },
-        "performance": {
-            "total_activities": len(performances),
-            "average_score": round(avg_score, 2)
-        },
-        "affective": {
-            "motivation": affective.motivation if affective else 0.5,
-            "frustration": affective.frustration if affective else 0.0,
-            "confidence": affective.confidence if affective else 0.5,
-            "stress": affective.stress if affective else 0.0
-        } if affective else None,
-        "behavior": {
-            "engagement_score": behavior.engagement_score if behavior else 0.0
-        } if behavior else None,
-        "overall_status": _compute_overall_status(
-            avg_mastery,
-            avg_score,
-            affective
-        )
+        "knowledge_model": knowledge,
+        "performance_model": performance,
+        "behavioral_model": behavior_profile,
+        "affective_state": affective_state,
+        "overall_status": overall_status,
+        "generated_at": func.now()
     }
 
 
-def _compute_overall_status(
+def _determine_overall_status(
     avg_mastery: float,
     avg_score: float,
-    affective: LearnerAffectiveState = None
-) -> str:
+    engagement: float
+) -> Dict[str, Any]:
     """
-    Calculer le statut global de l'apprenant.
+    Déterminer le statut global de l'apprenant.
     
     Args:
         avg_mastery: Maîtrise moyenne
         avg_score: Score moyen
-        affective: État affectif
+        engagement: Score d'engagement
     
     Returns:
-        Statut global
+        Statut global avec niveau et description
     """
+    # Score composite
+    composite_score = (avg_mastery * 0.4) + (avg_score / 100 * 0.4) + (engagement * 0.2)
     
-    if avg_mastery >= 0.8 and avg_score >= 80:
-        if affective and affective.motivation > 0.7:
-            return "Excellent - Apprenant très performant et motivé"
-        return "Excellent - Apprenant très performant"
+    if composite_score >= 0.8:
+        level = "excellent"
+        description = "Performance excellente sur tous les axes"
+    elif composite_score >= 0.6:
+        level = "good"
+        description = "Bonne progression générale"
+    elif composite_score >= 0.4:
+        level = "moderate"
+        description = "Progression modérée, nécessite plus de pratique"
+    else:
+        level = "needs_improvement"
+        description = "Nécessite un accompagnement renforcé"
     
-    if avg_mastery >= 0.6 and avg_score >= 70:
-        if affective and affective.frustration > 0.6:
-            return "Bon - Apprenant performant mais frustré"
-        return "Bon - Apprenant performant"
-    
-    if avg_mastery >= 0.4 and avg_score >= 50:
-        if affective and affective.motivation < 0.3:
-            return "Moyen - Apprenant en apprentissage mais démotivé"
-        return "Moyen - Apprenant en apprentissage"
-    
-    if affective and affective.frustration > 0.7:
-        return "Faible - Apprenant en difficulté et très frustré"
-    
-    return "Faible - Apprenant en difficulté"
+    return {
+        "level": level,
+        "composite_score": round(composite_score, 2),
+        "description": description
+    }

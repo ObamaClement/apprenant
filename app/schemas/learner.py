@@ -6,11 +6,12 @@ from typing import Optional
 
 class LearnerBase(BaseModel):
     """Schéma de base pour un apprenant."""
-    first_name: str
-    last_name: str
+    matricule: Optional[str] = None
+    nom: str
     email: EmailStr
-    level: Optional[str] = None
-    field_of_study: Optional[str] = None
+    niveau_etudes: Optional[str] = None
+    specialite_visee: Optional[str] = None
+    langue_preferee: Optional[str] = "fr"
 
 
 class LearnerCreate(LearnerBase):
@@ -20,16 +21,43 @@ class LearnerCreate(LearnerBase):
 
 class LearnerUpdate(BaseModel):
     """Schéma pour mettre à jour un apprenant."""
-    first_name: Optional[str] = None
-    last_name: Optional[str] = None
-    level: Optional[str] = None
-    field_of_study: Optional[str] = None
+    matricule: Optional[str] = None
+    nom: Optional[str] = None
+    niveau_etudes: Optional[str] = None
+    specialite_visee: Optional[str] = None
+    langue_preferee: Optional[str] = None
 
 
 class LearnerResponse(LearnerBase):
     """Schéma de réponse pour un apprenant."""
     id: int
-    created_at: datetime
+    date_inscription: datetime
+    
+    # Propriétés de compatibilité
+    @property
+    def first_name(self) -> str:
+        if self.nom:
+            return self.nom.split()[0]
+        return ""
+    
+    @property
+    def last_name(self) -> str:
+        if self.nom:
+            parts = self.nom.split()
+            return " ".join(parts[1:]) if len(parts) > 1 else ""
+        return ""
+    
+    @property
+    def level(self) -> Optional[str]:
+        return self.niveau_etudes
+    
+    @property
+    def field_of_study(self) -> Optional[str]:
+        return self.specialite_visee
+    
+    @property
+    def created_at(self) -> datetime:
+        return self.date_inscription
     
     class Config:
         from_attributes = True

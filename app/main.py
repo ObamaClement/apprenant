@@ -6,7 +6,7 @@ from app.core.database import Base, engine
 from app.models.learner import Learner
 from app.models.learning_history import LearningHistory
 from app.models.concept import Concept
-from app.models.learner_knowledge import LearnerKnowledge
+from Backend.app.models.learner_competency_mastery import LearnerKnowledge
 from app.models.learner_performance import LearnerPerformance
 from app.models.learner_behavior import LearnerBehavior
 from app.models.learner_cognitive import LearnerCognitiveProfile
